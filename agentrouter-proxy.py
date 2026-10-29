@@ -39,14 +39,61 @@ import threading
 import os
 import datetime
 import collections
+import hmac
+
+if sys.stdout and hasattr(sys.stdout, "reconfigure"):
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+if sys.stderr and hasattr(sys.stderr, "reconfigure"):
+    try:
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
+
+def load_env_file(path: str = None) -> None:
+    """Load key-value pairs from a .env file into os.environ without overwriting existing vars."""
+    if path is None:
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+    if not os.path.isfile(path):
+        return
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                if "=" in line:
+                    k, v = line.split("=", 1)
+                    k = k.strip()
+                    v = v.strip().strip("'\"")
+                    if k and k not in os.environ:
+                        os.environ[k] = v
+    except Exception:
+        pass
+
+
+load_env_file()
 
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
 
-UPSTREAM = os.environ.get("AGENTROUTER_UPSTREAM", "https://agentrouter.org")
-PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 4182
-API_KEY = os.environ.get("AGENTROUTER_API_KEY", "")
+UPSTREAM = os.environ.get(
+    "PROXY_UPSTREAM", os.environ.get("AGENTROUTER_UPSTREAM", "https://agentrouter.org")
+).rstrip("/")
+PORT = int(sys.argv[1]) if len(sys.argv) > 1 and sys.argv[1].isdigit() else 4182
+API_KEY = os.environ.get(
+    "PROXY_UPSTREAM_API_KEY", os.environ.get("AGENTROUTER_API_KEY", "")
+)
+LISTEN_HOST = os.environ.get("PROXY_LISTEN_HOST", "127.0.0.1")
+PROXY_AUTH_TOKEN = os.environ.get("PROXY_AUTH_TOKEN", "")
+UPSTREAM_AUTH_SCHEME = os.environ.get("PROXY_UPSTREAM_AUTH_SCHEME", "Bearer")
+MAX_BODY_BYTES = int(os.environ.get("PROXY_MAX_BODY_BYTES", str(20 * 1024 * 1024)))
+UPSTREAM_TIMEOUT = float(os.environ.get("PROXY_UPSTREAM_TIMEOUT", "300"))
+INJECT_PREAMBLE = os.environ.get("PROXY_INJECT_PREAMBLE", "0") == "1"
 USER_AGENT = "opencode/1.17.12"
 CTX = ssl.create_default_context()
 
@@ -66,6 +113,8 @@ SUPPORTED_MODELS = {
     "claude-opus-4-6",
     "gpt-5.5",
     "gpt-5.6-sol",
+    "gpt-6.1-sol",
+    "gpt-6-astra",
     "glm-5.2",
     "kimi-k3",
 }
@@ -136,16 +185,9 @@ _stats = {
 # Blocked Content Logger
 # ---------------------------------------------------------------------------
 
-LOG_DIR = os.path.dirname(os.path.abspath(__file__))
-LOG_FILE = os.path.join(LOG_DIR, "blocked-requests.log")
-
-
 def log_blocked_content(body: bytes, error_body: bytes = b"", extra_info: str = ""):
-    """Log the content that triggered content-blocked to both stderr and
-    a persistent log file so the user can identify problematic content."""
-    timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    """Log safe metadata only; request bodies and prompts never touch disk."""
     model = "unknown"
-    last_user_msg = "(no user message found)"
     msg_count = 0
 
     try:
@@ -154,64 +196,22 @@ def log_blocked_content(body: bytes, error_body: bytes = b"", extra_info: str = 
         messages = obj.get("messages", [])
         msg_count = len(messages)
 
-        # Find last user message
-        for msg in reversed(messages):
-            if msg.get("role") == "user":
-                content = msg.get("content", "")
-                if isinstance(content, str):
-                    last_user_msg = content
-                elif isinstance(content, list):
-                    # Multi-part content (text + images)
-                    parts = []
-                    for part in content:
-                        if isinstance(part, dict) and part.get("type") == "text":
-                            parts.append(part.get("text", ""))
-                        elif isinstance(part, dict):
-                            parts.append(f"[{part.get('type', 'unknown')}]")
-                    last_user_msg = " ".join(parts)
-                break
     except (json.JSONDecodeError, ValueError):
         pass
-
-    # Truncate for display (stderr)
-    preview = last_user_msg[:300]
-    if len(last_user_msg) > 300:
-        preview += "..."
 
     # Parse error response
     error_info = ""
     if error_body:
         error_info = error_body.decode(errors="replace")[:200]
 
-    # --- Print to stderr (truncated) ---
     sys.stderr.write(
-        f"[ar] BLOCKED CONTENT DETAILS:\n"
-        f"[ar]   Model:    {model}\n"
-        f"[ar]   Messages: {msg_count} total\n"
-        f"[ar]   Last user msg: {preview}\n"
+        f"[ar] blocked content: model={model!r} messages={msg_count} "
+        f"request_bytes={len(body)} response_bytes={len(error_body)}\n"
     )
     if extra_info:
         sys.stderr.write(f"[ar]   Extra:    {extra_info}\n")
     if error_info:
         sys.stderr.write(f"[ar]   Server response: {error_info}\n")
-    sys.stderr.write("[ar]   Full log saved to: blocked-requests.log\n")
-
-    # --- Write to log file (full content) ---
-    try:
-        with open(LOG_FILE, "a", encoding="utf-8") as f:
-            f.write(f"{'=' * 72}\n")
-            f.write(f"Timestamp: {timestamp}\n")
-            f.write(f"Model:     {model}\n")
-            f.write(f"Messages:  {msg_count} total\n")
-            if extra_info:
-                f.write(f"Extra:     {extra_info}\n")
-            if error_info:
-                f.write(f"Server:    {error_info}\n")
-            f.write(f"---\n")
-            f.write(f"Last user message:\n{last_user_msg}\n")
-            f.write(f"{'=' * 72}\n\n")
-    except Exception as ex:
-        sys.stderr.write(f"[ar] WARNING: could not write to log file: {ex}\n")
 
 
 # ===================================================================
@@ -494,7 +494,8 @@ def normalize_request_body(raw: bytes, path: str):
     if not isinstance(obj, dict):
         return path, body
 
-    obj = inject_system_preamble(obj)
+    if INJECT_PREAMBLE:
+        obj = inject_system_preamble(obj)
     path, obj = normalize_upstream_path(path, obj)
     if obj is None:
         return path, body
@@ -790,7 +791,20 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         self._proxy()
 
     def do_GET(self):
+        if self.path == "/healthz":
+            if not self._authorized():
+                return
+            body = b'{"status":"ok"}\n'
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            self.wfile.flush()
+            return
         if self.path == "/_stats":
+            if not self._authorized():
+                return
             self._serve_stats()
             return
         self._proxy()
@@ -800,6 +814,7 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
         self.send_header("Access-Control-Allow-Headers", "*")
+        self.send_header("Content-Length", "0")
         self.end_headers()
 
     # ------ Stats endpoint ------
@@ -814,10 +829,39 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
+    def _authorized(self):
+        """Authorize clients when a token is configured."""
+        if not PROXY_AUTH_TOKEN:
+            return True
+        supplied = self.headers.get("Authorization", "")
+        expected = f"Bearer {PROXY_AUTH_TOKEN}"
+        if hmac.compare_digest(supplied, expected):
+            return True
+        err = b'{"error":{"message":"proxy authentication required"}}\n'
+        self.send_response(401)
+        self.send_header("WWW-Authenticate", "Bearer")
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(err)))
+        self.end_headers()
+        self.wfile.write(err)
+        self.wfile.flush()
+        return False
+
     # ------ Main proxy logic ------
 
     def _proxy(self):
+        if not self._authorized():
+            return
         content_len = int(self.headers.get("Content-Length", 0))
+        if content_len > MAX_BODY_BYTES:
+            err = b'{"error":{"message":"request body too large"}}\n'
+            self.send_response(413)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(err)))
+            self.end_headers()
+            self.wfile.write(err)
+            self.wfile.flush()
+            return
         raw_body = self.rfile.read(content_len) if content_len > 0 else None
 
         with _stats_lock:
@@ -859,9 +903,9 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         for k, v in self.headers.items():
             kl = k.lower()
             if kl not in ("host", "connection", "transfer-encoding",
-                          "accept-encoding"):
+                          "accept-encoding", "authorization"):
                 hdrs[k] = v
-        hdrs["Authorization"] = f"Bearer {API_KEY}"
+        hdrs["Authorization"] = f"{UPSTREAM_AUTH_SCHEME} {API_KEY}"
         hdrs["User-Agent"] = USER_AGENT
         # Force uncompressed responses so we can filter SSE line-by-line.
         hdrs["Accept-Encoding"] = "identity"
@@ -897,7 +941,7 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                 pass
 
         try:
-            resp = urllib.request.urlopen(req, context=CTX, timeout=300)
+            resp = urllib.request.urlopen(req, context=CTX, timeout=UPSTREAM_TIMEOUT)
 
             if is_stream:
                 self._handle_stream_response(resp, body, model, is_retry, debug, target_path)
@@ -910,10 +954,13 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
 
         except Exception as e:
             sys.stderr.write(f"[ar] EXCEPTION: {e}\n")
+            err_data = json.dumps({"error": str(e)}).encode() + b"\n"
             self.send_response(502)
             self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(err_data)))
             self.end_headers()
-            self.wfile.write(json.dumps({"error": str(e)}).encode())
+            self.wfile.write(err_data)
+            self.wfile.flush()
 
     # ------ Streaming response handler (with buffered early detection) ------
 
@@ -934,8 +981,8 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         # Check if first event is content-blocked
         if first_event is not None and is_content_blocked(first_event) and body and not is_retry:
             sys.stderr.write(
-                "[ar] \u26a0 content-blocked in SSE stream (early detect), "
-                "retrying with trimmed context\u2026\n"
+                "[ar] [WARN] content-blocked in SSE stream (early detect), "
+                "retrying with trimmed context...\n"
             )
             log_blocked_content(body, first_event, extra_info="SSE early-detect block")
             with _stats_lock:
@@ -977,7 +1024,7 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             # Log content-blocked if it appears mid-stream (can't retry)
             if is_content_blocked(event):
                 sys.stderr.write(
-                    "[ar] \u26a0 content-blocked detected in SSE "
+                    "[ar] [WARN] content-blocked detected in SSE "
                     "stream (cannot retry mid-stream)\n"
                 )
                 with _stats_lock:
@@ -987,7 +1034,7 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             if cleaned is None:
                 if debug:
                     sys.stderr.write(
-                        "[ar-dbg] \u2192 DISCARDED by filter\n"
+                        "[ar-dbg] -> DISCARDED by filter\n"
                     )
                 continue
 
@@ -1000,7 +1047,7 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         # All events streamed successfully — reset block counter
         _reset_block_counter(model)
         if is_retry:
-            sys.stderr.write("[ar] \u2713 retry succeeded\n")
+            sys.stderr.write("[ar] [OK] retry succeeded\n")
             with _stats_lock:
                 _stats["retry_success"] += 1
 
@@ -1013,8 +1060,8 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         # Content-blocked in a 200 response
         if not is_retry and is_content_blocked(buf) and body:
             sys.stderr.write(
-                "[ar] \u26a0 content-blocked in 200 response, "
-                "retrying with trimmed context\u2026\n"
+                "[ar] [WARN] content-blocked in 200 response, "
+                "retrying with trimmed context...\n"
             )
             log_blocked_content(body, buf)
             with _stats_lock:
@@ -1022,7 +1069,7 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             if not _check_and_increment_block(model):
                 # Anti-loop triggered
                 sys.stderr.write(
-                    f"[ar] \u2717 anti-loop: {model} blocked "
+                    f"[ar] [FAIL] anti-loop: {model} blocked "
                     f"{MAX_CONSECUTIVE_BLOCKS}+ times, giving up\n"
                 )
                 with _stats_lock:
@@ -1040,11 +1087,11 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
 
         # Retry outcome logging
         if is_retry and is_content_blocked(buf):
-            sys.stderr.write("[ar] \u2717 retry also blocked\n")
+            sys.stderr.write("[ar] [FAIL] retry also blocked\n")
             with _stats_lock:
                 _stats["retry_failed"] += 1
         elif is_retry:
-            sys.stderr.write("[ar] \u2713 retry succeeded\n")
+            sys.stderr.write("[ar] [OK] retry succeeded\n")
             with _stats_lock:
                 _stats["retry_success"] += 1
             _reset_block_counter(model)
@@ -1052,10 +1099,12 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         cleaned = clean_nonstream_body(buf)
         self.send_response(resp.status)
         for k, v in resp.headers.items():
-            if k.lower() not in ("transfer-encoding", "connection"):
+            if k.lower() not in ("transfer-encoding", "connection", "content-length"):
                 self.send_header(k, v)
+        self.send_header("Content-Length", str(len(cleaned)))
         self.end_headers()
         self.wfile.write(cleaned)
+        self.wfile.flush()
 
         # Reset block counter on success
         if not is_content_blocked(buf):
@@ -1068,8 +1117,8 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         # Content-blocked retry (HTTP error)
         if not is_retry and is_content_blocked(err_body) and body:
             sys.stderr.write(
-                f"[ar] \u26a0 content-blocked (HTTP {e.code}), "
-                f"retrying with trimmed context\u2026\n"
+                f"[ar] [WARN] content-blocked (HTTP {e.code}), "
+                f"retrying with trimmed context...\n"
             )
             log_blocked_content(body, err_body)
             with _stats_lock:
@@ -1078,7 +1127,7 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             if not _check_and_increment_block(model):
                 # Anti-loop triggered
                 sys.stderr.write(
-                    f"[ar] \u2717 anti-loop: {model} blocked "
+                    f"[ar] [FAIL] anti-loop: {model} blocked "
                     f"{MAX_CONSECUTIVE_BLOCKS}+ times, giving up\n"
                 )
                 with _stats_lock:
@@ -1096,11 +1145,11 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
 
         # Retry outcome logging
         if is_retry and is_content_blocked(err_body):
-            sys.stderr.write("[ar] \u2717 retry also blocked\n")
+            sys.stderr.write("[ar] [FAIL] retry also blocked\n")
             with _stats_lock:
                 _stats["retry_failed"] += 1
         elif is_retry:
-            sys.stderr.write("[ar] \u2713 retry succeeded (error cleared)\n")
+            sys.stderr.write("[ar] [OK] retry succeeded (error cleared)\n")
             with _stats_lock:
                 _stats["retry_success"] += 1
             _reset_block_counter(model)
@@ -1119,7 +1168,7 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
     # ------ Logging ------
 
     def log_message(self, format, *args):
-        sys.stderr.write(f"[ar] {args[0]} \u2192 {args[1]}\n")
+        sys.stderr.write(f"[ar] {args[0]} -> {args[1]}\n")
 
 
 # ===================================================================
@@ -1154,28 +1203,38 @@ class ThreadedHTTPServer(http.server.HTTPServer):
 if __name__ == "__main__":
     if not API_KEY:
         print(
-            "ERROR: set AGENTROUTER_API_KEY environment variable\n"
-            "  Windows:  set AGENTROUTER_API_KEY=sk-...\n"
-            "  Linux:    export AGENTROUTER_API_KEY=sk-...",
+            "ERROR: PROXY_UPSTREAM_API_KEY (or AGENTROUTER_API_KEY) is required.\n"
+            "  Create a .env file next to this script with:\n"
+            "    PROXY_UPSTREAM_API_KEY=your-api-key\n"
+            "  Or set it in your environment:\n"
+            "    Windows:  $env:PROXY_UPSTREAM_API_KEY=\"your-key\"\n"
+            "    Linux:    export PROXY_UPSTREAM_API_KEY=\"your-key\"",
             file=sys.stderr,
         )
         sys.exit(1)
 
+    if not UPSTREAM.startswith("https://") and os.environ.get("PROXY_ALLOW_INSECURE_UPSTREAM") != "1":
+        print("ERROR: upstream must use HTTPS (set PROXY_ALLOW_INSECURE_UPSTREAM=1 only for local testing)", file=sys.stderr)
+        sys.exit(1)
+
+    if LISTEN_HOST not in {"127.0.0.1", "localhost", "::1"} and not PROXY_AUTH_TOKEN:
+        print("ERROR: PROXY_AUTH_TOKEN is required when PROXY_LISTEN_HOST is not loopback", file=sys.stderr)
+        sys.exit(1)
+
     fmt_str = FORMAT_MODE if FORMAT_MODE in ("openai", "anthropic") else "auto-detect"
-    server = ThreadedHTTPServer(("127.0.0.1", PORT), ProxyHandler)
-    print(f"\u26a1 agentrouter-proxy v3.1 ::{PORT} \u2192 {UPSTREAM}")
-    print(f"  Content-block mitigation: ENABLED")
-    print(f"  System prompt injection:  ENABLED")
+    server = ThreadedHTTPServer((LISTEN_HOST, PORT), ProxyHandler)
+    print(f"* provider proxy ::{LISTEN_HOST}:{PORT} -> {UPSTREAM}")
+    print(f"  Content-block retry:      ENABLED")
+    print(f"  System prompt injection:  {'ENABLED' if INJECT_PREAMBLE else 'DISABLED'}")
     print(f"  Payload format:           {fmt_str} (OpenAI + Anthropic)")
     print(f"  Anti-loop protection:     {MAX_CONSECUTIVE_BLOCKS} max retries")
     print(f"  SSE buffered reading:     {SSE_CHUNK_SIZE}b chunks")
-    print(f"  Added model:              claude-opus-5")
-    print(f"  Blocked log:              {LOG_FILE}")
+    print(f"  Incoming auth:            {'ENABLED' if PROXY_AUTH_TOKEN else 'local-only'}")
     print(f"  Stats endpoint:           http://localhost:{PORT}/_stats")
     print(f"  Debug mode:               {'ON' if os.environ.get('AGENTROUTER_DEBUG') == '1' else 'OFF'}")
     print()
     try:
         server.serve_forever()
     except KeyboardInterrupt:
-        print("\n\u23f9  Proxy stopped.")
+        print("\n*  Proxy stopped.")
         server.server_close()
