@@ -94,7 +94,7 @@ UPSTREAM_AUTH_SCHEME = os.environ.get("PROXY_UPSTREAM_AUTH_SCHEME", "Bearer")
 MAX_BODY_BYTES = int(os.environ.get("PROXY_MAX_BODY_BYTES", str(20 * 1024 * 1024)))
 UPSTREAM_TIMEOUT = float(os.environ.get("PROXY_UPSTREAM_TIMEOUT", "300"))
 INJECT_PREAMBLE = os.environ.get("PROXY_INJECT_PREAMBLE", "0") == "1"
-USER_AGENT = "opencode/1.17.12"
+USER_AGENT = "opencode/2.2.1"
 CTX = ssl.create_default_context()
 
 # Format mode: auto (detect), openai, anthropic
@@ -474,13 +474,34 @@ def is_responses_model(model: str) -> bool:
 
 def responses_to_chat_completion(res_json: dict, model: str) -> dict:
     output_text = ""
+    tool_calls = []
     for item in res_json.get("output", []):
-        if item.get("type") == "message":
+        itype = item.get("type")
+        if itype == "message":
             for c in item.get("content", []):
                 if c.get("text"):
                     output_text += c.get("text")
+        elif itype == "function_call":
+            tool_calls.append({
+                "id": item.get("call_id") or item.get("id", "call_default"),
+                "type": "function",
+                "function": {
+                    "name": item.get("name", ""),
+                    "arguments": item.get("arguments", "{}"),
+                },
+            })
+
     usage_raw = res_json.get("usage")
     usage = usage_raw if isinstance(usage_raw, dict) else {}
+    finish_reason = "tool_calls" if tool_calls else "stop"
+
+    msg = {
+        "role": "assistant",
+        "content": output_text or None,
+    }
+    if tool_calls:
+        msg["tool_calls"] = tool_calls
+
     return {
         "id": res_json.get("id", "chatcmpl-responses"),
         "object": "chat.completion",
@@ -489,11 +510,8 @@ def responses_to_chat_completion(res_json: dict, model: str) -> dict:
         "choices": [
             {
                 "index": 0,
-                "message": {
-                    "role": "assistant",
-                    "content": output_text,
-                },
-                "finish_reason": "stop",
+                "message": msg,
+                "finish_reason": finish_reason,
             }
         ],
         "usage": {
@@ -514,6 +532,7 @@ def translate_responses_sse_line(line: bytes, resp_id: str = "chatcmpl-stream") 
         data = json.loads(raw)
     except Exception:
         return []
+
     event_type = data.get("type")
     if event_type == "response.output_text.delta":
         delta = data.get("delta", "")
@@ -521,6 +540,44 @@ def translate_responses_sse_line(line: bytes, resp_id: str = "chatcmpl-stream") 
             "id": resp_id,
             "object": "chat.completion.chunk",
             "choices": [{"index": 0, "delta": {"content": delta}}],
+        }
+        return [b"data: " + json.dumps(chunk, separators=(",", ":")).encode() + b"\n\n"]
+    elif event_type == "response.output_item.added":
+        item = data.get("item", {})
+        if item.get("type") == "function_call":
+            chunk = {
+                "id": resp_id,
+                "object": "chat.completion.chunk",
+                "choices": [{
+                    "index": 0,
+                    "delta": {
+                        "tool_calls": [{
+                            "index": 0,
+                            "id": item.get("call_id") or item.get("id", ""),
+                            "type": "function",
+                            "function": {
+                                "name": item.get("name", ""),
+                                "arguments": "",
+                            },
+                        }]
+                    },
+                }],
+            }
+            return [b"data: " + json.dumps(chunk, separators=(",", ":")).encode() + b"\n\n"]
+    elif event_type == "response.function_call_arguments.delta":
+        delta = data.get("delta", "")
+        chunk = {
+            "id": resp_id,
+            "object": "chat.completion.chunk",
+            "choices": [{
+                "index": 0,
+                "delta": {
+                    "tool_calls": [{
+                        "index": 0,
+                        "function": {"arguments": delta},
+                    }]
+                },
+            }],
         }
         return [b"data: " + json.dumps(chunk, separators=(",", ":")).encode() + b"\n\n"]
     elif event_type in ("response.completed", "response.done"):
@@ -565,6 +622,28 @@ def normalize_upstream_path(path: str, obj: dict | None = None) -> tuple[str, di
             resp_payload["temperature"] = obj["temperature"]
         if "max_tokens" in obj or "max_completion_tokens" in obj:
             resp_payload["max_output_tokens"] = obj.get("max_tokens") or obj.get("max_completion_tokens")
+
+        # Convert tools to Responses API format
+        if "tools" in obj and isinstance(obj["tools"], list):
+            r_tools = []
+            for t in obj["tools"]:
+                if not isinstance(t, dict):
+                    continue
+                if "function" in t and isinstance(t["function"], dict):
+                    fn = t["function"]
+                    r_tools.append({
+                        "type": "function",
+                        "name": fn.get("name", ""),
+                        "description": fn.get("description", ""),
+                        "parameters": fn.get("parameters", {}),
+                    })
+                else:
+                    r_tools.append(t)
+            resp_payload["tools"] = r_tools
+
+        if "tool_choice" in obj:
+            resp_payload["tool_choice"] = obj["tool_choice"]
+
         return "/v1/responses", resp_payload
 
     return path, obj
@@ -1104,11 +1183,17 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
 
         if is_converted_chat:
             resp_id = f"chatcmpl-{model}"
-            all_events = ([first_event] if first_event else []) + list(reader.read_events())
-            for event in all_events:
+            if first_event is not None:
+                for line in first_event.splitlines():
+                    for tl in translate_responses_sse_line(line, resp_id):
+                        try:
+                            self.wfile.write(tl)
+                            self.wfile.flush()
+                        except (BrokenPipeError, ConnectionResetError):
+                            return
+            for event in reader.read_events():
                 for line in event.splitlines():
-                    translated_lines = translate_responses_sse_line(line, resp_id)
-                    for tl in translated_lines:
+                    for tl in translate_responses_sse_line(line, resp_id):
                         try:
                             self.wfile.write(tl)
                             self.wfile.flush()
