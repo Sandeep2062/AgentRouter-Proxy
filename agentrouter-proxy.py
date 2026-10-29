@@ -461,6 +461,80 @@ def anthropic_to_openai(obj: dict) -> dict:
     return normalized
 
 
+
+RESPONSES_MODELS = {"gpt-6.1-sol", "gpt-5.6-sol", "gpt-6-astra"}
+
+
+def is_responses_model(model: str) -> bool:
+    if not isinstance(model, str):
+        return False
+    m = model.strip().lower()
+    return m in RESPONSES_MODELS or m.endswith("-sol") or "astra" in m
+
+
+def responses_to_chat_completion(res_json: dict, model: str) -> dict:
+    output_text = ""
+    for item in res_json.get("output", []):
+        if item.get("type") == "message":
+            for c in item.get("content", []):
+                if c.get("text"):
+                    output_text += c.get("text")
+    usage_raw = res_json.get("usage")
+    usage = usage_raw if isinstance(usage_raw, dict) else {}
+    return {
+        "id": res_json.get("id", "chatcmpl-responses"),
+        "object": "chat.completion",
+        "created": res_json.get("created_at", int(datetime.datetime.now().timestamp())),
+        "model": res_json.get("model", model),
+        "choices": [
+            {
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": output_text,
+                },
+                "finish_reason": "stop",
+            }
+        ],
+        "usage": {
+            "prompt_tokens": usage.get("input_tokens", 0),
+            "completion_tokens": usage.get("output_tokens", 0),
+            "total_tokens": usage.get("total_tokens", 0),
+        },
+    }
+
+
+def translate_responses_sse_line(line: bytes, resp_id: str = "chatcmpl-stream") -> list[bytes]:
+    if not line.startswith(b"data: "):
+        return []
+    raw = line[6:].strip()
+    if not raw or raw == b"[DONE]":
+        return [b"data: [DONE]\n\n"]
+    try:
+        data = json.loads(raw)
+    except Exception:
+        return []
+    event_type = data.get("type")
+    if event_type == "response.output_text.delta":
+        delta = data.get("delta", "")
+        chunk = {
+            "id": resp_id,
+            "object": "chat.completion.chunk",
+            "choices": [{"index": 0, "delta": {"content": delta}}],
+        }
+        return [b"data: " + json.dumps(chunk, separators=(",", ":")).encode() + b"\n\n"]
+    elif event_type in ("response.completed", "response.done"):
+        stop_chunk = {
+            "id": resp_id,
+            "object": "chat.completion.chunk",
+            "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+        }
+        return [
+            b"data: " + json.dumps(stop_chunk, separators=(",", ":")).encode() + b"\n\n",
+            b"data: [DONE]\n\n",
+        ]
+    return []
+
 def normalize_upstream_path(path: str, obj: dict | None = None) -> tuple[str, dict]:
     """Map Anthropic-style requests to an OpenAI-compatible upstream path.
 
@@ -474,8 +548,24 @@ def normalize_upstream_path(path: str, obj: dict | None = None) -> tuple[str, di
     if fmt == "anthropic":
         # Map /v1/messages, /v1, / to /v1/chat/completions
         if path in {"/v1", "/v1/", ""} or path.endswith("/messages"):
-            return "/v1/chat/completions", anthropic_to_openai(obj)
-        return path, anthropic_to_openai(obj)
+            path, obj = "/v1/chat/completions", anthropic_to_openai(obj)
+        else:
+            obj = anthropic_to_openai(obj)
+
+    model = obj.get("model", "")
+    if path in ("/v1/chat/completions", "/chat/completions") and is_responses_model(model):
+        resp_payload = {
+            "model": model,
+            "input": obj.get("messages", []),
+            "_converted_from_chat": True,
+        }
+        if "stream" in obj:
+            resp_payload["stream"] = obj["stream"]
+        if "temperature" in obj:
+            resp_payload["temperature"] = obj["temperature"]
+        if "max_tokens" in obj or "max_completion_tokens" in obj:
+            resp_payload["max_output_tokens"] = obj.get("max_tokens") or obj.get("max_completion_tokens")
+        return "/v1/responses", resp_payload
 
     return path, obj
 
@@ -1004,6 +1094,28 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                 self.send_header(k, v)
         self.end_headers()
 
+        is_converted_chat = False
+        if target_path == "/v1/responses" and body:
+            try:
+                req_obj = json.loads(body)
+                is_converted_chat = req_obj.get("_converted_from_chat", False)
+            except Exception:
+                pass
+
+        if is_converted_chat:
+            resp_id = f"chatcmpl-{model}"
+            all_events = ([first_event] if first_event else []) + list(reader.read_events())
+            for event in all_events:
+                for line in event.splitlines():
+                    translated_lines = translate_responses_sse_line(line, resp_id)
+                    for tl in translated_lines:
+                        try:
+                            self.wfile.write(tl)
+                            self.wfile.flush()
+                        except (BrokenPipeError, ConnectionResetError):
+                            return
+            return
+
         # Forward the first event (already read)
         if first_event is not None:
             cleaned = clean_sse_line(first_event)
@@ -1096,7 +1208,23 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                 _stats["retry_success"] += 1
             _reset_block_counter(model)
 
-        cleaned = clean_nonstream_body(buf)
+        is_converted_chat = False
+        if target_path == "/v1/responses" and body:
+            try:
+                req_obj = json.loads(body)
+                is_converted_chat = req_obj.get("_converted_from_chat", False)
+            except Exception:
+                pass
+
+        if is_converted_chat and not is_content_blocked(buf):
+            try:
+                res_obj = json.loads(buf)
+                chat_comp = responses_to_chat_completion(res_obj, model)
+                cleaned = json.dumps(chat_comp, separators=(",", ":")).encode("utf-8")
+            except Exception:
+                cleaned = clean_nonstream_body(buf)
+        else:
+            cleaned = clean_nonstream_body(buf)
         self.send_response(resp.status)
         for k, v in resp.headers.items():
             if k.lower() not in ("transfer-encoding", "connection", "content-length"):

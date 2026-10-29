@@ -35,6 +35,36 @@ class ProxyBehaviorTests(unittest.TestCase):
         cleaned = json.loads(proxy.clean_request_body(raw))
         self.assertEqual(cleaned, {"model": "demo", "nested": {"keep": 1}})
 
+    def test_responses_model_request_and_response_translation(self):
+        payload = {
+            "model": "gpt-6.1-sol",
+            "messages": [{"role": "user", "content": "hello"}],
+        }
+        path, body = proxy.normalize_request_body(json.dumps(payload).encode(), "/v1/chat/completions")
+        self.assertEqual(path, "/v1/responses")
+        req_obj = json.loads(body)
+        self.assertEqual(req_obj["model"], "gpt-6.1-sol")
+        self.assertEqual(req_obj["input"], [{"role": "user", "content": "hello"}])
+        self.assertTrue(req_obj["_converted_from_chat"])
+
+        # Test output translation
+        responses_output = {
+            "id": "resp_test_123",
+            "model": "gpt-6.1-sol",
+            "created_at": 1234567,
+            "output": [
+                {
+                    "type": "message",
+                    "content": [{"type": "output_text", "text": "hello back"}]
+                }
+            ],
+            "usage": {"input_tokens": 5, "output_tokens": 2, "total_tokens": 7}
+        }
+        chat_comp = proxy.responses_to_chat_completion(responses_output, "gpt-6.1-sol")
+        self.assertEqual(chat_comp["object"], "chat.completion")
+        self.assertEqual(chat_comp["choices"][0]["message"]["content"], "hello back")
+        self.assertEqual(chat_comp["usage"]["total_tokens"], 7)
+
     def test_anthropic_payload_is_converted(self):
         payload = {
             "model": "demo-model",
