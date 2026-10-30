@@ -161,11 +161,90 @@ curl.exe -H "Authorization: Bearer choose-a-strong-client-secret-token" http://1
 
 Once your proxy is running (either locally at `127.0.0.1:4182` or remotely at `100.x.y.z:4182`), configure your tools:
 
-### OpenCode
+### OpenCode (v2 & v1 Support)
 
-In your `opencode.json` (per-project or in `~/.config/opencode/opencode.json`):
+Configure OpenCode in your workspace `opencode.json` (or `opencode.jsonc`) or globally in `~/.config/opencode/opencode.json`:
 
-#### When Connecting over Tailscale (Wyse / Server PC):
+#### OpenCode v2 Recommended Configuration (Tailscale Wyse Server)
+```jsonc
+{
+  "$schema": "https://opencode.ai/config.json",
+  "providers": {
+    "agentrouter": {
+      "name": "AgentRouter (Wyse Tailscale Proxy)",
+      "package": "@opencode/ai/providers/openai-compatible",
+      "settings": {
+        "baseURL": "http://100.97.230.23:4182/v1"
+      },
+      "headers": {
+        "Authorization": "Bearer your-client-auth-token"
+      },
+      "compatibility": {
+        "streamUsage": true,
+        "requireFinishReason": true
+      },
+      "models": {
+        "gpt-6.1-sol": {
+          "name": "GPT 6.1 Sol",
+          "limit": { "context": 200000, "output": 16384 },
+          "variants": [
+            { "id": "high", "settings": { "reasoningEffort": "high" } },
+            { "id": "xhigh", "settings": { "reasoningEffort": "xhigh" } }
+          ]
+        },
+        "claude-opus-5": {
+          "name": "Claude Opus 5",
+          "limit": { "context": 200000, "output": 8192 }
+        },
+        "claude-opus-4-8": {
+          "name": "Claude Opus 4.8",
+          "limit": { "context": 200000, "output": 8192 }
+        },
+        "gpt-5.5": {
+          "name": "GPT 5.5",
+          "limit": { "context": 128000, "output": 16384 }
+        },
+        "glm-5.2": {
+          "name": "GLM 5.2",
+          "limit": { "context": 128000, "output": 8192 }
+        }
+      }
+    }
+  }
+}
+```
+
+#### OpenCode v2 Recommended Configuration (Local Single PC)
+```jsonc
+{
+  "$schema": "https://opencode.ai/config.json",
+  "providers": {
+    "agentrouter": {
+      "name": "AgentRouter (Local Proxy)",
+      "package": "@opencode/ai/providers/openai-compatible",
+      "settings": {
+        "baseURL": "http://127.0.0.1:4182/v1"
+      },
+      "headers": {
+        "Authorization": "Bearer local-proxy-token"
+      },
+      "compatibility": {
+        "streamUsage": true,
+        "requireFinishReason": true
+      },
+      "models": {
+        "gpt-6.1-sol": { "name": "GPT 6.1 Sol" },
+        "claude-opus-5": { "name": "Claude Opus 5" },
+        "gpt-5.5": { "name": "GPT 5.5" }
+      }
+    }
+  }
+}
+```
+
+<details>
+<summary>Click to view OpenCode v1 Legacy Configuration (using npm & options)</summary>
+
 ```json
 {
   "$schema": "https://opencode.ai/config.json",
@@ -180,41 +259,13 @@ In your `opencode.json` (per-project or in `~/.config/opencode/opencode.json`):
       "models": {
         "gpt-6.1-sol": { "name": "GPT 6.1 Sol" },
         "claude-opus-5": { "name": "Claude Opus 5" },
-        "claude-opus-4-8": { "name": "Claude Opus 4.8" },
-        "claude-opus-4-7": { "name": "Claude Opus 4.7" },
-        "claude-opus-4-6": { "name": "Claude Opus 4.6" },
-        "gpt-5.5": { "name": "GPT 5.5" },
-        "glm-5.2": { "name": "GLM 5.2" }
-      }
-    }
-  }
-}
-```
-
-#### When Running Locally (Same PC):
-```json
-{
-  "$schema": "https://opencode.ai/config.json",
-  "provider": {
-    "agentrouter-proxy-local": {
-      "name": "AgentRouter (Local Proxy)",
-      "npm": "@ai-sdk/openai-compatible",
-      "options": {
-        "baseURL": "http://127.0.0.1:4182/v1",
-        "apiKey": "local-proxy-token"
-      },
-      "models": {
-        "gpt-6.1-sol": { "name": "GPT 6.1 Sol" },
-        "claude-opus-5": { "name": "Claude Opus 5" },
-        "claude-opus-4-8": { "name": "Claude Opus 4.8" },
-        "claude-opus-4-7": { "name": "Claude Opus 4.7" },
-        "claude-opus-4-6": { "name": "Claude Opus 4.6" },
         "gpt-5.5": { "name": "GPT 5.5" }
       }
     }
   }
 }
 ```
+</details>
 
 > [!TIP]
 > **Why use this provider instead of `AgentRouter (Direct Responses API)`?**
@@ -367,7 +418,7 @@ Example response:
 }
 ```
 
-> **Note:** Streaming responses (`stream: true`) do not include per-chunk token counts from AgentRouter, so those requests are not counted. Non-streaming requests are fully counted.
+> **Note:** Token usage tracking works automatically for **both streaming and non-streaming requests**. For streaming requests, the proxy captures final usage statistics from the upstream completion event and records them into `usage.json` while also forwarding an OpenAI-compatible usage chunk (`choices: [], usage: {...}`) for OpenCode/AI SDK `streamUsage: true` support.
 
 ---
 
@@ -395,11 +446,27 @@ The test suite includes:
 - **Why this happens:** When OpenCode connects directly to AgentRouter's native `/v1/responses` endpoint (e.g. `AgentRouter (Direct Responses API)`), multi-turn sessions (such as the `Build` agent executing tools like `planning-with-files`) send stateful item or response IDs. AgentRouter load-balances incoming requests across multiple regional Azure OpenAI clusters. When Turn 2 lands on a different Azure cluster than Turn 1, Azure rejects the request with this error.
 - **Solution:** Route through `AgentRouter-Proxy`. In OpenCode's model selector, select `AgentRouter (Wyse Tailscale Proxy)` or `AgentRouter (Local Proxy)`. The proxy converts requests into standard stateless OpenAI Chat Completions payloads, sending self-contained inputs on every turn so cross-cluster Azure routing never conflicts.
 
-### 2. "Connection timed out on Wyse / Remote PC"
+### 2. "The tool input could not be parsed as JSON" (`Skill ""` parallel tool error)
+- **Why this happens:** When reasoning models invoke parallel tool calls concurrently (e.g. `executing-plans` and `documentation-writer`), naive SSE stream translators emit all argument delta chunks with hardcoded tool index `0`. This concatenates multiple distinct JSON argument payloads into one invalid string (e.g. `{"id":"executing-plans"}{"id":"documentation-writer"}`), causing the IDE tool parser to crash.
+- **Solution:** `AgentRouter-Proxy` implements a stateful `ResponsesStreamTranslator` that tracks `output_index` and `item_id`, mapping each distinct parallel function call to its own sequential index (`0, 1, 2...`).
+
+### 3. "Missing required parameter: 'input[2].content'"
+- **Why this happens:** OpenAI Chat Completions stores tool calls in `message.tool_calls` with `content: null`. When forwarded directly to the Responses API, Azure/OpenAI rejects assistant messages with missing `content`.
+- **Solution:** `AgentRouter-Proxy` translates tool calls and tool execution results into top-level standalone Responses items (`function_call` and `function_call_output`), ensuring all message items contain valid, non-null `content`.
+
+### 4. "Integer below minimum value. Expected a value >= 16"
+- **Why this happens:** AgentRouter's `/v1/responses` endpoint strictly requires `max_output_tokens >= 16`. When an agent harness sends small limits (e.g. `max_tokens: 5`), the upstream validator returns HTTP 400.
+- **Solution:** `AgentRouter-Proxy` automatically clamps `max_output_tokens` to `max(16, val)`.
+
+### 5. "Cannot unmarshal object into Go struct field OpenAIResponsesResponse.tool_choice of type string"
+- **Why this happens:** AgentRouter's Go backend unmarshals `tool_choice` strictly as a string. If an IDE harness sends an object (e.g. `{"type": "function", "function": {"name": "read_file"}}`), AgentRouter crashes with HTTP 500.
+- **Solution:** `AgentRouter-Proxy` sanitizes dictionary `tool_choice` objects into string format (`"auto"`, `"required"`, or the target function name).
+
+### 6. "Connection timed out on Wyse / Remote PC"
 - **Why this happens:** Windows automatically enters sleep or standby mode after 15 to 30 minutes of keyboard/mouse inactivity. Since a headless server PC has no physical user input, Windows puts the machine to sleep, dropping SSH and Tailscale connections.
 - **Solution:** Run `install-autostart.bat` on the server PC. It runs `powercfg /change standby-timeout-ac 0` to permanently disable sleep on AC power, keeping the server reachable 24/7.
 
-### 3. "The following users have been banned due to long-term use that does not support the client"
+### 7. "The following users have been banned due to long-term use that does not support the client"
 - **Why this happens:** AgentRouter blocks or bans accounts making high volumes of API requests with generic or unauthorized user-agent headers.
 - **Solution:** `AgentRouter-Proxy` automatically injects `User-Agent: opencode/2.2.1` into all upstream requests to ensure full compatibility with provider policies.
 

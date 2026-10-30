@@ -246,5 +246,98 @@ class ProxyBehaviorTests(unittest.TestCase):
             upstream.server_close()
 
 
+    def test_max_output_tokens_clamped_and_tool_choice_sanitized(self):
+        # 1. Converted chat completion request with small max_tokens (< 16) and dict tool_choice
+        payload_chat = {
+            "model": "gpt-6.1-sol",
+            "messages": [{"role": "user", "content": "hi"}],
+            "max_tokens": 5,
+            "tool_choice": {"type": "function", "function": {"name": "read_file"}},
+        }
+        path, body = proxy.normalize_request_body(json.dumps(payload_chat).encode(), "/v1/chat/completions")
+        self.assertEqual(path, "/v1/responses")
+        req_obj = json.loads(body)
+        self.assertEqual(req_obj["max_output_tokens"], 16)  # clamped to minimum 16
+        self.assertEqual(req_obj["tool_choice"], "read_file")  # extracted function name string
+
+        # 2. Converted with auto tool_choice object
+        payload_chat2 = {
+            "model": "gpt-6.1-sol",
+            "messages": [{"role": "user", "content": "hi"}],
+            "tool_choice": {"type": "auto"},
+        }
+        path, body = proxy.normalize_request_body(json.dumps(payload_chat2).encode(), "/v1/chat/completions")
+        req_obj2 = json.loads(body)
+        self.assertEqual(req_obj2["tool_choice"], "auto")
+
+        # 3. Direct /v1/responses request with max_output_tokens < 16 and dict tool_choice
+        payload_direct = {
+            "model": "gpt-6.1-sol",
+            "input": [{"role": "user", "content": "hi"}],
+            "max_output_tokens": 2,
+            "tool_choice": {"type": "required"},
+        }
+        path, body = proxy.normalize_request_body(json.dumps(payload_direct).encode(), "/v1/responses")
+        self.assertEqual(path, "/v1/responses")
+        req_obj3 = json.loads(body)
+        self.assertEqual(req_obj3["max_output_tokens"], 16)
+        self.assertEqual(req_obj3["tool_choice"], "required")
+
+    def test_streaming_usage_emission_and_incomplete_stop(self):
+        # Test stream usage chunk emission on response.completed
+        translator = proxy.ResponsesStreamTranslator("chatcmpl-stream-test", model="gpt-6.1-sol")
+        completed_evt = b"data: " + json.dumps({
+            "type": "response.completed",
+            "response": {
+                "output": [{"type": "message", "content": [{"text": "done"}]}],
+                "usage": {"input_tokens": 40, "output_tokens": 15, "total_tokens": 55}
+            }
+        }).encode() + b"\n\n"
+
+        chunks = translator.translate_line(completed_evt.strip())
+        self.assertEqual(len(chunks), 3)  # stop chunk, usage chunk, [DONE]
+
+        # 1. Stop chunk
+        c1 = json.loads(chunks[0][6:].strip())
+        self.assertEqual(c1["choices"][0]["finish_reason"], "stop")
+
+        # 2. Usage chunk (choices: [], usage: {...})
+        c2 = json.loads(chunks[1][6:].strip())
+        self.assertEqual(c2["choices"], [])
+        self.assertEqual(c2["usage"]["prompt_tokens"], 40)
+        self.assertEqual(c2["usage"]["completion_tokens"], 15)
+        self.assertEqual(c2["usage"]["total_tokens"], 55)
+
+        # 3. [DONE]
+        self.assertEqual(chunks[2], b"data: [DONE]\n\n")
+
+        # Test response.incomplete translation (e.g. max token limit hit)
+        incomplete_translator = proxy.ResponsesStreamTranslator("chatcmpl-inc", model="gpt-6.1-sol")
+        incomplete_evt = b"data: " + json.dumps({
+            "type": "response.incomplete",
+            "response": {
+                "output": [],
+                "usage": {"input_tokens": 50, "output_tokens": 16, "total_tokens": 66}
+            }
+        }).encode() + b"\n\n"
+
+        chunks_inc = incomplete_translator.translate_line(incomplete_evt.strip())
+        self.assertEqual(len(chunks_inc), 3)
+        c1_inc = json.loads(chunks_inc[0][6:].strip())
+        self.assertEqual(c1_inc["choices"][0]["finish_reason"], "length")
+        c2_inc = json.loads(chunks_inc[1][6:].strip())
+        self.assertEqual(c2_inc["usage"]["total_tokens"], 66)
+        self.assertEqual(chunks_inc[2], b"data: [DONE]\n\n")
+
+        # Test response.failed translation
+        failed_translator = proxy.ResponsesStreamTranslator("chatcmpl-fail")
+        failed_evt = b"data: " + json.dumps({"type": "response.failed"}).encode() + b"\n\n"
+        chunks_fail = failed_translator.translate_line(failed_evt.strip())
+        self.assertEqual(len(chunks_fail), 2)
+        c1_fail = json.loads(chunks_fail[0][6:].strip())
+        self.assertEqual(c1_fail["choices"][0]["finish_reason"], "stop")
+        self.assertEqual(chunks_fail[1], b"data: [DONE]\n\n")
+
+
 if __name__ == "__main__":
     unittest.main()

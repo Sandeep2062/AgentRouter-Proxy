@@ -758,10 +758,12 @@ class ResponsesStreamTranslator:
 
     Maintains tool call index mapping across streaming chunks so parallel tool calls
     each receive their own distinct index (0, 1, 2...) instead of concatenating into index 0.
+    Also tracks token usage and emits usage chunks for OpenCode / AI SDK streamUsage compatibility.
     """
 
-    def __init__(self, resp_id: str = "chatcmpl-stream"):
+    def __init__(self, resp_id: str = "chatcmpl-stream", model: str = ""):
         self.resp_id = resp_id
+        self.model = model
         self.tool_indices = {}  # item_id -> 0, 1, ...
         self.output_index_map = {}  # output_index -> 0, 1, ...
 
@@ -850,10 +852,79 @@ class ResponsesStreamTranslator:
                 "object": "chat.completion.chunk",
                 "choices": [{"index": 0, "delta": {}, "finish_reason": finish_reason}],
             }
+            chunks = [b"data: " + json.dumps(stop_chunk, separators=(",", ":")).encode() + b"\n\n"]
+
+            # Stream usage chunk for OpenAI compatibility (streamUsage: true)
+            usage_data = resp_obj.get("usage") if isinstance(resp_obj, dict) else {}
+            if isinstance(usage_data, dict) and (usage_data.get("total_tokens") or usage_data.get("input_tokens") or usage_data.get("output_tokens")):
+                p_tokens = int(usage_data.get("input_tokens") or usage_data.get("prompt_tokens") or 0)
+                c_tokens = int(usage_data.get("output_tokens") or usage_data.get("completion_tokens") or 0)
+                t_tokens = int(usage_data.get("total_tokens") or (p_tokens + c_tokens))
+
+                if self.model and (p_tokens or c_tokens or t_tokens):
+                    try:
+                        record_tokens(self.model, p_tokens, c_tokens, t_tokens)
+                    except Exception:
+                        pass
+
+                usage_chunk = {
+                    "id": self.resp_id,
+                    "object": "chat.completion.chunk",
+                    "choices": [],
+                    "usage": {
+                        "prompt_tokens": p_tokens,
+                        "completion_tokens": c_tokens,
+                        "total_tokens": t_tokens,
+                    },
+                }
+                chunks.append(b"data: " + json.dumps(usage_chunk, separators=(",", ":")).encode() + b"\n\n")
+
+            chunks.append(b"data: [DONE]\n\n")
+            return chunks
+
+        elif event_type == "response.incomplete":
+            resp_obj = data.get("response") if isinstance(data.get("response"), dict) else data
+            stop_chunk = {
+                "id": self.resp_id,
+                "object": "chat.completion.chunk",
+                "choices": [{"index": 0, "delta": {}, "finish_reason": "length"}],
+            }
+            chunks = [b"data: " + json.dumps(stop_chunk, separators=(",", ":")).encode() + b"\n\n"]
+            usage_data = resp_obj.get("usage") if isinstance(resp_obj, dict) else {}
+            if isinstance(usage_data, dict) and (usage_data.get("total_tokens") or usage_data.get("input_tokens")):
+                p_tokens = int(usage_data.get("input_tokens") or usage_data.get("prompt_tokens") or 0)
+                c_tokens = int(usage_data.get("output_tokens") or usage_data.get("completion_tokens") or 0)
+                t_tokens = int(usage_data.get("total_tokens") or (p_tokens + c_tokens))
+                if self.model and (p_tokens or c_tokens or t_tokens):
+                    try:
+                        record_tokens(self.model, p_tokens, c_tokens, t_tokens)
+                    except Exception:
+                        pass
+                usage_chunk = {
+                    "id": self.resp_id,
+                    "object": "chat.completion.chunk",
+                    "choices": [],
+                    "usage": {
+                        "prompt_tokens": p_tokens,
+                        "completion_tokens": c_tokens,
+                        "total_tokens": t_tokens,
+                    },
+                }
+                chunks.append(b"data: " + json.dumps(usage_chunk, separators=(",", ":")).encode() + b"\n\n")
+            chunks.append(b"data: [DONE]\n\n")
+            return chunks
+
+        elif event_type == "response.failed":
+            stop_chunk = {
+                "id": self.resp_id,
+                "object": "chat.completion.chunk",
+                "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+            }
             return [
                 b"data: " + json.dumps(stop_chunk, separators=(",", ":")).encode() + b"\n\n",
                 b"data: [DONE]\n\n",
             ]
+
         return []
 
 
@@ -891,7 +962,12 @@ def normalize_upstream_path(path: str, obj: dict | None = None) -> tuple[str, di
         if "temperature" in obj:
             resp_payload["temperature"] = obj["temperature"]
         if "max_tokens" in obj or "max_completion_tokens" in obj:
-            resp_payload["max_output_tokens"] = obj.get("max_tokens") or obj.get("max_completion_tokens")
+            val = obj.get("max_tokens") if "max_tokens" in obj else obj.get("max_completion_tokens")
+            try:
+                # AgentRouter Responses API requires max_output_tokens >= 16
+                resp_payload["max_output_tokens"] = max(16, int(val))
+            except (ValueError, TypeError):
+                pass
 
         # Convert tools to Responses API format
         if "tools" in obj and isinstance(obj["tools"], list):
@@ -912,9 +988,40 @@ def normalize_upstream_path(path: str, obj: dict | None = None) -> tuple[str, di
             resp_payload["tools"] = r_tools
 
         if "tool_choice" in obj:
-            resp_payload["tool_choice"] = obj["tool_choice"]
+            tc = obj["tool_choice"]
+            if isinstance(tc, str):
+                resp_payload["tool_choice"] = tc
+            elif isinstance(tc, dict):
+                # AgentRouter Go backend unmarshals tool_choice as string, object causes 500 error
+                fn = tc.get("function", {}) if isinstance(tc.get("function"), dict) else {}
+                fn_name = fn.get("name") or tc.get("name")
+                if fn_name and isinstance(fn_name, str):
+                    resp_payload["tool_choice"] = fn_name
+                elif tc.get("type") in ("auto", "none", "required"):
+                    resp_payload["tool_choice"] = tc["type"]
+                else:
+                    resp_payload["tool_choice"] = "auto"
 
         return "/v1/responses", resp_payload
+
+    if path in ("/v1/responses", "/responses"):
+        # Clamp max_output_tokens >= 16 to avoid AgentRouter 400 rejection
+        if "max_output_tokens" in obj:
+            try:
+                obj["max_output_tokens"] = max(16, int(obj["max_output_tokens"]))
+            except (ValueError, TypeError):
+                pass
+        # Sanitize dict tool_choice to avoid AgentRouter Go unmarshal 500 error
+        if "tool_choice" in obj and isinstance(obj["tool_choice"], dict):
+            tc = obj["tool_choice"]
+            fn = tc.get("function", {}) if isinstance(tc.get("function"), dict) else {}
+            fn_name = fn.get("name") or tc.get("name")
+            if fn_name and isinstance(fn_name, str):
+                obj["tool_choice"] = fn_name
+            elif tc.get("type") in ("auto", "none", "required"):
+                obj["tool_choice"] = tc["type"]
+            else:
+                obj["tool_choice"] = "auto"
 
     return path, obj
 
@@ -1470,7 +1577,7 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
 
         if is_converted_chat:
             resp_id = f"chatcmpl-{model}"
-            translator = ResponsesStreamTranslator(resp_id)
+            translator = ResponsesStreamTranslator(resp_id, model=model)
             if first_event is not None:
                 for line in first_event.splitlines():
                     for tl in translator.translate_line(line):
@@ -1514,6 +1621,24 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                 )
                 with _stats_lock:
                     _stats["content_blocked"] += 1
+
+            # Record tokens from usage chunks in standard streaming
+            if b'"usage"' in event:
+                try:
+                    for eline in event.splitlines():
+                        eline_str = eline.strip()
+                        if eline_str.startswith(b"data: ") and eline_str != b"data: [DONE]":
+                            chunk_obj = json.loads(eline_str[6:])
+                            u = chunk_obj.get("usage")
+                            if isinstance(u, dict) and (u.get("total_tokens") or u.get("prompt_tokens")):
+                                record_tokens(
+                                    model=model,
+                                    prompt_tokens=int(u.get("prompt_tokens", 0)),
+                                    completion_tokens=int(u.get("completion_tokens", 0)),
+                                    total_tokens=int(u.get("total_tokens", 0)),
+                                )
+                except Exception:
+                    pass
 
             cleaned = clean_sse_line(event)
             if cleaned is None:
