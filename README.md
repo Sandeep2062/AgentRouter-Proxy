@@ -194,20 +194,36 @@ print(response.choices[0].message.content)
 
 ---
 
-## Running Continuously in Background on Windows (Wyse)
+## Auto-Start on System Boot (Windows & Wyse PC)
 
-If you want the proxy to run automatically in the background on your remote PC even after reboots:
+To keep the proxy running 24/7 as a background service on your server PC (e.g. Dell Wyse thin client or home server):
 
-### Option A: Windows Scheduled Task
-On the remote machine (e.g. via SSH):
-
+### 1. One-Click Automated Setup
+On the server PC, double-click:
 ```cmd
-schtasks /create /tn "AgentRouterProxy" /tr "python C:\Users\GCLC\AgentRouter-Proxy\agentrouter-proxy.py 4182" /sc onstart /ru SYSTEM
+install-autostart.bat
+```
+This automated installer:
+1. **Installs a silent auto-start launcher** into `%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup\AgentRouter-Proxy.vbs`.
+2. **Registers a Windows Scheduled Task** (`AgentRouterProxy`) for logon triggers.
+3. **Disables Windows sleep on AC power** (`powercfg /change standby-timeout-ac 0`), preventing the Wyse PC from going into sleep mode while running headless.
+4. **Starts the proxy immediately in the background** without opening any black command window.
+5. **Appends all logs** to `proxy.log` in real time.
+
+### 2. Check Proxy Status & Logs
+Run `status-proxy.bat` or run in terminal:
+```powershell
+# Check if proxy is running
+.\status-proxy.bat
+
+# Or view real-time logs
+powershell Get-Content .\proxy.log -Wait -Tail 20
 ```
 
-### Option B: PowerShell Detached Process
-```powershell
-Start-Process python -ArgumentList "C:\Users\GCLC\AgentRouter-Proxy\agentrouter-proxy.py 4182" -WindowStyle Hidden
+### 3. Uninstall Auto-Start
+To completely remove auto-start and terminate background proxy processes:
+```cmd
+uninstall-autostart.bat
 ```
 
 ---
@@ -248,6 +264,22 @@ The test suite includes:
 - SSE billing/null stream filtering.
 - Structured content-block error detection.
 - End-to-end authentication isolation and token verification against an in-process mock server.
+
+---
+
+## Troubleshooting & FAQ
+
+### 1. "The requested item was created under a different Azure OpenAI resource"
+- **Why this happens:** When OpenCode connects directly to AgentRouter's native `/v1/responses` endpoint (e.g. `AgentRouter (Direct Responses API)`), multi-turn sessions (such as the `Build` agent executing tools like `planning-with-files`) send stateful item or response IDs. AgentRouter load-balances incoming requests across multiple regional Azure OpenAI clusters. When Turn 2 lands on a different Azure cluster than Turn 1, Azure rejects the request with this error.
+- **Solution:** Route through `AgentRouter-Proxy`. In OpenCode's model selector, select `AgentRouter (Wyse Tailscale Proxy)` or `AgentRouter (Local Proxy)`. The proxy converts requests into standard stateless OpenAI Chat Completions payloads, sending self-contained inputs on every turn so cross-cluster Azure routing never conflicts.
+
+### 2. "Connection timed out on Wyse / Remote PC"
+- **Why this happens:** Windows automatically enters sleep or standby mode after 15 to 30 minutes of keyboard/mouse inactivity. Since a headless server PC has no physical user input, Windows puts the machine to sleep, dropping SSH and Tailscale connections.
+- **Solution:** Run `install-autostart.bat` on the server PC. It runs `powercfg /change standby-timeout-ac 0` to permanently disable sleep on AC power, keeping the server reachable 24/7.
+
+### 3. "The following users have been banned due to long-term use that does not support the client"
+- **Why this happens:** AgentRouter blocks or bans accounts making high volumes of API requests with generic or unauthorized user-agent headers.
+- **Solution:** `AgentRouter-Proxy` automatically injects `User-Agent: opencode/2.2.1` into all upstream requests to ensure full compatibility with provider policies.
 
 ---
 

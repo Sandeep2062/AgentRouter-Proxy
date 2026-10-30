@@ -40,6 +40,54 @@ import os
 import datetime
 import collections
 import hmac
+import subprocess
+
+_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+_LOG_PATH = os.path.join(_SCRIPT_DIR, "proxy.log")
+
+class TeeLogger:
+    def __init__(self, filename, original):
+        self.filename = filename
+        self.original = original
+        self.file = None
+        try:
+            self.file = open(filename, "a", encoding="utf-8", buffering=1)
+        except Exception:
+            pass
+
+    def write(self, text):
+        if self.original:
+            try:
+                self.original.write(text)
+            except Exception:
+                pass
+        if self.file:
+            try:
+                self.file.write(text)
+            except Exception:
+                pass
+
+    def flush(self):
+        if self.original and hasattr(self.original, "flush"):
+            try:
+                self.original.flush()
+            except Exception:
+                pass
+        if self.file and hasattr(self.file, "flush"):
+            try:
+                self.file.flush()
+            except Exception:
+                pass
+
+    def isatty(self):
+        if self.original and hasattr(self.original, "isatty"):
+            try:
+                return self.original.isatty()
+            except Exception:
+                pass
+        return False
+
+
 
 if sys.stdout and hasattr(sys.stdout, "reconfigure"):
     try:
@@ -51,6 +99,9 @@ if sys.stderr and hasattr(sys.stderr, "reconfigure"):
         sys.stderr.reconfigure(encoding="utf-8", errors="replace")
     except Exception:
         pass
+
+sys.stdout = TeeLogger(_LOG_PATH, sys.stdout)
+sys.stderr = TeeLogger(_LOG_PATH, sys.stderr)
 
 
 def load_env_file(path: str = None) -> None:
@@ -89,6 +140,13 @@ API_KEY = os.environ.get(
     "PROXY_UPSTREAM_API_KEY", os.environ.get("AGENTROUTER_API_KEY", "")
 )
 LISTEN_HOST = os.environ.get("PROXY_LISTEN_HOST", "127.0.0.1")
+if LISTEN_HOST.strip().lower() == "tailscale":
+    try:
+        ts_ip = subprocess.check_output(["tailscale", "ip", "-4"], text=True, timeout=3).strip().splitlines()[0]
+        if ts_ip:
+            LISTEN_HOST = ts_ip
+    except Exception:
+        LISTEN_HOST = "0.0.0.0"
 PROXY_AUTH_TOKEN = os.environ.get("PROXY_AUTH_TOKEN", "")
 UPSTREAM_AUTH_SCHEME = os.environ.get("PROXY_UPSTREAM_AUTH_SCHEME", "Bearer")
 MAX_BODY_BYTES = int(os.environ.get("PROXY_MAX_BODY_BYTES", str(20 * 1024 * 1024)))
