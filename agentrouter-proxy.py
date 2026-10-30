@@ -608,6 +608,101 @@ def is_responses_model(model: str) -> bool:
     return m in RESPONSES_MODELS or m.endswith("-sol") or "astra" in m
 
 
+def chat_messages_to_responses_input(messages: list) -> list:
+    """Convert OpenAI/Chat-Completions style `messages` to Responses API `input` items.
+
+    In OpenAI Chat Completions:
+    - Assistant tool calls are inside `message.tool_calls`
+    - Tool responses are messages with `role: "tool"` and `tool_call_id`
+    - Text blocks are {"type": "text", "text": "..."}
+
+    In Responses API:
+    - Tool calls are standalone items with `type: "function_call"`, `call_id`, `name`, `arguments`
+    - Tool responses are standalone items with `type: "function_call_output"`, `call_id`, `output`
+    - Every message item MUST have a non-null `content` field.
+    - Content text blocks use `type: "input_text"` instead of `type: "text"`.
+    """
+    if not isinstance(messages, list):
+        return []
+
+    responses_input = []
+
+    for msg in messages:
+        if not isinstance(msg, dict):
+            continue
+
+        # If already formatted as a Responses API item, preserve it
+        if msg.get("type") in ("function_call", "function_call_output"):
+            responses_input.append(msg)
+            continue
+
+        role = msg.get("role", "")
+        content = msg.get("content")
+
+        if isinstance(content, list):
+            all_text = all(isinstance(b, dict) and b.get("type") in ("text", "input_text") for b in content)
+            if all_text:
+                normalized_content = "".join(b.get("text", "") for b in content if isinstance(b, dict))
+            else:
+                normalized_content = []
+                for b in content:
+                    if not isinstance(b, dict):
+                        continue
+                    b_type = b.get("type")
+                    if b_type == "text":
+                        normalized_content.append({"type": "input_text", "text": b.get("text", "")})
+                    elif b_type == "image_url":
+                        normalized_content.append({"type": "input_image", "image_url": b.get("image_url")})
+                    else:
+                        normalized_content.append(b)
+        elif content is None:
+            normalized_content = ""
+        else:
+            normalized_content = str(content)
+
+        if role in ("tool", "function"):
+            call_id = msg.get("tool_call_id") or msg.get("id") or msg.get("name", "call_default")
+            output_val = normalized_content if isinstance(normalized_content, str) else json.dumps(normalized_content, separators=(",", ":"))
+            responses_input.append({
+                "type": "function_call_output",
+                "call_id": call_id,
+                "output": output_val,
+            })
+            continue
+
+        tool_calls = msg.get("tool_calls")
+        if role == "assistant" and tool_calls and isinstance(tool_calls, list):
+            if normalized_content:
+                responses_input.append({
+                    "role": "assistant",
+                    "content": normalized_content,
+                })
+            for tc in tool_calls:
+                if not isinstance(tc, dict):
+                    continue
+                call_id = tc.get("id") or "call_default"
+                fn = tc.get("function", {}) if isinstance(tc.get("function"), dict) else {}
+                name = fn.get("name") or tc.get("name", "")
+                args = fn.get("arguments") if "arguments" in fn else tc.get("arguments", "{}")
+                if not isinstance(args, str):
+                    args = json.dumps(args, separators=(",", ":"))
+                responses_input.append({
+                    "type": "function_call",
+                    "id": f"fc_{call_id}" if not str(call_id).startswith("fc_") else str(call_id),
+                    "call_id": call_id,
+                    "name": name,
+                    "arguments": args,
+                })
+            continue
+
+        responses_input.append({
+            "role": role if role in ("user", "assistant", "system", "developer") else "user",
+            "content": normalized_content,
+        })
+
+    return responses_input
+
+
 def responses_to_chat_completion(res_json: dict, model: str) -> dict:
     output_text = ""
     tool_calls = []
@@ -717,10 +812,16 @@ def translate_responses_sse_line(line: bytes, resp_id: str = "chatcmpl-stream") 
         }
         return [b"data: " + json.dumps(chunk, separators=(",", ":")).encode() + b"\n\n"]
     elif event_type in ("response.completed", "response.done"):
+        resp_obj = data.get("response") if isinstance(data.get("response"), dict) else data
+        has_tool_call = any(
+            isinstance(it, dict) and it.get("type") == "function_call"
+            for it in resp_obj.get("output", [])
+        )
+        finish_reason = "tool_calls" if has_tool_call else "stop"
         stop_chunk = {
             "id": resp_id,
             "object": "chat.completion.chunk",
-            "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+            "choices": [{"index": 0, "delta": {}, "finish_reason": finish_reason}],
         }
         return [
             b"data: " + json.dumps(stop_chunk, separators=(",", ":")).encode() + b"\n\n",
@@ -749,7 +850,7 @@ def normalize_upstream_path(path: str, obj: dict | None = None) -> tuple[str, di
     if path in ("/v1/chat/completions", "/chat/completions") and is_responses_model(model):
         resp_payload = {
             "model": model,
-            "input": obj.get("messages", []),
+            "input": chat_messages_to_responses_input(obj.get("messages", [])),
             "_converted_from_chat": True,
         }
         if "stream" in obj:
