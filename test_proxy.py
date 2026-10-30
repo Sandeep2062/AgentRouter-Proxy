@@ -329,14 +329,26 @@ class ProxyBehaviorTests(unittest.TestCase):
         self.assertEqual(c2_inc["usage"]["total_tokens"], 66)
         self.assertEqual(chunks_inc[2], b"data: [DONE]\n\n")
 
-        # Test response.failed translation
+        # Test response.failed translation with error detail surfacing
         failed_translator = proxy.ResponsesStreamTranslator("chatcmpl-fail")
-        failed_evt = b"data: " + json.dumps({"type": "response.failed"}).encode() + b"\n\n"
+        failed_evt = b"data: " + json.dumps({"type": "response.failed", "error": {"message": "rate limit reached"}}).encode() + b"\n\n"
         chunks_fail = failed_translator.translate_line(failed_evt.strip())
         self.assertEqual(len(chunks_fail), 2)
         c1_fail = json.loads(chunks_fail[0][6:].strip())
         self.assertEqual(c1_fail["choices"][0]["finish_reason"], "stop")
+        self.assertIn("rate limit reached", c1_fail["choices"][0]["delta"]["content"])
         self.assertEqual(chunks_fail[1], b"data: [DONE]\n\n")
+
+        # Test empty turn completion emits transparent prompt notice
+        empty_turn_translator = proxy.ResponsesStreamTranslator("chatcmpl-empty", model="gpt-6.1-sol")
+        completed_empty_evt = b"data: " + json.dumps({
+            "type": "response.completed",
+            "response": {"output": [], "usage": {"input_tokens": 100, "output_tokens": 0, "total_tokens": 100}}
+        }).encode() + b"\n\n"
+        chunks_empty = empty_turn_translator.translate_line(completed_empty_evt.strip())
+        c1_empty = json.loads(chunks_empty[0][6:].strip())
+        self.assertEqual(c1_empty["choices"][0]["finish_reason"], "stop")
+        self.assertIn("Discovery and checks completed", c1_empty["choices"][0]["delta"]["content"])
 
 
 if __name__ == "__main__":

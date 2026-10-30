@@ -768,6 +768,8 @@ class ResponsesStreamTranslator:
         self.model = model
         self.tool_indices = {}  # item_id -> 0, 1, ...
         self.output_index_map = {}  # output_index -> 0, 1, ...
+        self.has_emitted_content = False
+        self.has_emitted_tool_call = False
 
     def translate_line(self, line: bytes) -> list[bytes]:
         if not line.startswith(b"data: "):
@@ -783,6 +785,8 @@ class ResponsesStreamTranslator:
         event_type = data.get("type")
         if event_type == "response.output_text.delta":
             delta = data.get("delta", "")
+            if delta:
+                self.has_emitted_content = True
             chunk = {
                 "id": self.resp_id,
                 "object": "chat.completion.chunk",
@@ -793,6 +797,7 @@ class ResponsesStreamTranslator:
         elif event_type == "response.output_item.added":
             item = data.get("item", {})
             if item.get("type") == "function_call":
+                self.has_emitted_tool_call = True
                 item_id = item.get("id") or item.get("call_id", "")
                 out_idx = data.get("output_index")
                 tool_idx = len(self.tool_indices)
@@ -844,15 +849,26 @@ class ResponsesStreamTranslator:
 
         elif event_type in ("response.completed", "response.done"):
             resp_obj = data.get("response") if isinstance(data.get("response"), dict) else data
-            has_tool_call = bool(self.tool_indices) or any(
+            has_tool_call = bool(self.tool_indices) or self.has_emitted_tool_call or any(
                 isinstance(it, dict) and it.get("type") == "function_call"
                 for it in resp_obj.get("output", [])
             )
+            has_message_content = any(
+                isinstance(it, dict) and it.get("type") == "message" and bool(it.get("content"))
+                for it in resp_obj.get("output", [])
+            )
             finish_reason = "tool_calls" if has_tool_call else "stop"
+
+            # If the model completed its turn without outputting ANY visible text or tool calls,
+            # include a concise prompt notice so OpenCode never renders a silent, confusing blank stop.
+            stop_delta = {}
+            if not self.has_emitted_content and not has_tool_call and not has_message_content:
+                stop_delta["content"] = "Discovery and checks completed. Ready for your approval or next instruction."
+
             stop_chunk = {
                 "id": self.resp_id,
                 "object": "chat.completion.chunk",
-                "choices": [{"index": 0, "delta": {}, "finish_reason": finish_reason}],
+                "choices": [{"index": 0, "delta": stop_delta, "finish_reason": finish_reason}],
             }
             chunks = [b"data: " + json.dumps(stop_chunk, separators=(",", ":")).encode() + b"\n\n"]
 
@@ -917,10 +933,36 @@ class ResponsesStreamTranslator:
             return chunks
 
         elif event_type == "response.failed":
+            resp_obj = data.get("response") if isinstance(data.get("response"), dict) else data
+            err_details = (
+                resp_obj.get("status_details", {}).get("error", {}).get("message")
+                or data.get("error", {}).get("message")
+                or "Upstream model generation failed or was rejected."
+            )
             stop_chunk = {
                 "id": self.resp_id,
                 "object": "chat.completion.chunk",
-                "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+                "choices": [{
+                    "index": 0,
+                    "delta": {"content": f"\n\n⚠️ [Upstream Notice]: {err_details}\n"},
+                    "finish_reason": "stop",
+                }],
+            }
+            return [
+                b"data: " + json.dumps(stop_chunk, separators=(",", ":")).encode() + b"\n\n",
+                b"data: [DONE]\n\n",
+            ]
+
+        elif event_type == "error":
+            err_msg = data.get("error", {}).get("message") or str(data)
+            stop_chunk = {
+                "id": self.resp_id,
+                "object": "chat.completion.chunk",
+                "choices": [{
+                    "index": 0,
+                    "delta": {"content": f"\n\n⚠️ [API Error]: {err_msg}\n"},
+                    "finish_reason": "stop",
+                }],
             }
             return [
                 b"data: " + json.dumps(stop_chunk, separators=(",", ":")).encode() + b"\n\n",
