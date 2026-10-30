@@ -963,6 +963,12 @@ def normalize_upstream_path(path: str, obj: dict | None = None) -> tuple[str, di
             resp_payload["stream"] = obj["stream"]
         if "temperature" in obj:
             resp_payload["temperature"] = obj["temperature"]
+        if "reasoning_effort" in obj:
+            effort = obj["reasoning_effort"]
+            resp_payload["reasoning"] = {"effort": effort}
+            resp_payload["reasoning_effort"] = effort
+        elif "reasoning" in obj:
+            resp_payload["reasoning"] = obj["reasoning"]
         if "max_tokens" in obj or "max_completion_tokens" in obj:
             val = obj.get("max_tokens") if "max_tokens" in obj else obj.get("max_completion_tokens")
             try:
