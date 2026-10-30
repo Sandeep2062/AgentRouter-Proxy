@@ -431,7 +431,7 @@ The test suite includes:
 > </p>
 > 
 > **Why use AgentRouter?**
-> - **Unified LLM Access:** Access state-of-the-art models including `gpt-6.1-sol`, `claude-opus-5`, `claude-opus-4-8`, `gpt-5.5`, and `glm-5.2` with high rate limits and resilient multi-cluster uptime.
+> - **Unified Frontier LLM Access:** Access the latest and most powerful reasoning and coding models from OpenAI, Anthropic, and top providers with high rate limits and resilient multi-cluster uptime.
 > - **Built for AI Coding Agents:** Seamless integration with OpenCode, Claude Code, Cursor, Cline, and Roo Code.
 > - **Support Ongoing Maintenance:** Signing up via this link helps support updates, upstream compatibility testing, and new feature development for this proxy. Thank you for your support!
 
