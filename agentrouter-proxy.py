@@ -134,21 +134,21 @@ load_env_file()
 
 UPSTREAM = os.environ.get(
     "PROXY_UPSTREAM", os.environ.get("AGENTROUTER_UPSTREAM", "https://agentrouter.org")
-).rstrip("/")
+).strip().rstrip("/")
 PORT = int(sys.argv[1]) if len(sys.argv) > 1 and sys.argv[1].isdigit() else 4182
 API_KEY = os.environ.get(
     "PROXY_UPSTREAM_API_KEY", os.environ.get("AGENTROUTER_API_KEY", "")
-)
-LISTEN_HOST = os.environ.get("PROXY_LISTEN_HOST", "127.0.0.1")
-if LISTEN_HOST.strip().lower() == "tailscale":
+).strip()
+LISTEN_HOST = os.environ.get("PROXY_LISTEN_HOST", "127.0.0.1").strip()
+if LISTEN_HOST.lower() in ("tailscale", "ts"):
     try:
         ts_ip = subprocess.check_output(["tailscale", "ip", "-4"], text=True, timeout=3).strip().splitlines()[0]
         if ts_ip:
             LISTEN_HOST = ts_ip
     except Exception:
         LISTEN_HOST = "0.0.0.0"
-PROXY_AUTH_TOKEN = os.environ.get("PROXY_AUTH_TOKEN", "")
-UPSTREAM_AUTH_SCHEME = os.environ.get("PROXY_UPSTREAM_AUTH_SCHEME", "Bearer")
+PROXY_AUTH_TOKEN = os.environ.get("PROXY_AUTH_TOKEN", "").strip()
+UPSTREAM_AUTH_SCHEME = os.environ.get("PROXY_UPSTREAM_AUTH_SCHEME", "Bearer").strip()
 MAX_BODY_BYTES = int(os.environ.get("PROXY_MAX_BODY_BYTES", str(20 * 1024 * 1024)))
 UPSTREAM_TIMEOUT = float(os.environ.get("PROXY_UPSTREAM_TIMEOUT", "300"))
 INJECT_PREAMBLE = os.environ.get("PROXY_INJECT_PREAMBLE", "0") == "1"
