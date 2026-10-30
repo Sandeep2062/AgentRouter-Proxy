@@ -64,11 +64,10 @@ set "STARTUP_VBS=%STARTUP_FOLDER%\AgentRouter-Proxy-Local.vbs"
 
 echo [*] Installing auto-start launcher for LOCAL proxy...
 (
+    echo Option Explicit
+    echo Dim WshShell
     echo Set WshShell = CreateObject^("WScript.Shell"^)
-    echo Set fso = CreateObject^("Scripting.FileSystemObject"^)
-    echo scriptDir = fso.GetParentFolderName^(WScript.ScriptFullName^)
-    echo WshShell.CurrentDirectory = scriptDir
-    echo WshShell.Run "cmd /c """"" ^& scriptDir ^& "\start-proxy.bat"""""", 0, False
+    echo WshShell.Run "wscript.exe """ ^& "%~dp0run-silent.vbs" ^& """", 0, False
 ) > "%STARTUP_VBS%"
 
 if exist "%STARTUP_VBS%" (
@@ -80,7 +79,7 @@ if exist "%STARTUP_VBS%" (
 :: -------------------------------------------------------
 :: 5. Register Scheduled Task
 :: -------------------------------------------------------
-schtasks /create /tn "AgentRouterProxy-Local" /tr "wscript.exe \"%STARTUP_VBS%\"" /sc onlogon /f >nul 2>&1
+schtasks /create /tn "AgentRouterProxy-Local" /tr "wscript.exe \"%~dp0run-silent.vbs\"" /sc onlogon /f >nul 2>&1
 if %errorlevel% equ 0 (
     echo [OK] Scheduled Task 'AgentRouterProxy-Local' registered.
 ) else (
@@ -92,7 +91,7 @@ if %errorlevel% equ 0 (
 :: -------------------------------------------------------
 echo.
 echo [*] Starting local proxy in background (no window)...
-wscript.exe "%STARTUP_VBS%"
+wscript.exe "%~dp0run-silent.vbs"
 timeout /t 2 /nobreak >nul
 
 :: -------------------------------------------------------

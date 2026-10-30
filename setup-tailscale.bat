@@ -97,11 +97,10 @@ set "STARTUP_VBS=%STARTUP_FOLDER%\AgentRouter-Proxy.vbs"
 
 echo [*] Installing auto-start launcher for Tailscale proxy...
 (
+    echo Option Explicit
+    echo Dim WshShell
     echo Set WshShell = CreateObject^("WScript.Shell"^)
-    echo Set fso = CreateObject^("Scripting.FileSystemObject"^)
-    echo scriptDir = fso.GetParentFolderName^(WScript.ScriptFullName^)
-    echo WshShell.CurrentDirectory = scriptDir
-    echo WshShell.Run "cmd /c """"" ^& scriptDir ^& "\start-tailscale.bat"""""", 0, False
+    echo WshShell.Run "wscript.exe """ ^& "%~dp0run-silent.vbs" ^& """", 0, False
 ) > "%STARTUP_VBS%"
 
 if exist "%STARTUP_VBS%" (
@@ -110,7 +109,7 @@ if exist "%STARTUP_VBS%" (
     echo [WARN] Could not write to Startup folder.
 )
 
-schtasks /create /tn "AgentRouterProxy" /tr "wscript.exe \"%STARTUP_VBS%\"" /sc onlogon /f >nul 2>&1
+schtasks /create /tn "AgentRouterProxy" /tr "wscript.exe \"%~dp0run-silent.vbs\"" /sc onlogon /f >nul 2>&1
 if %errorlevel% equ 0 (
     echo [OK] Scheduled Task 'AgentRouterProxy' registered.
 ) else (
@@ -122,7 +121,7 @@ if %errorlevel% equ 0 (
 :: -------------------------------------------------------
 echo.
 echo [*] Starting Tailscale proxy in background (no window)...
-wscript.exe "%STARTUP_VBS%"
+wscript.exe "%~dp0run-silent.vbs"
 timeout /t 3 /nobreak >nul
 
 :: -------------------------------------------------------

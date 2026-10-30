@@ -33,39 +33,60 @@ It automatically handles:
 
 ---
 
+## Local Proxy vs. Tailscale Proxy: Which One Do You Need?
+
+| Feature | Local Proxy (Single PC) | Tailscale Proxy (Two PCs / Server) |
+| --- | --- | --- |
+| **Where it runs** | On the same PC/laptop where you code | On a secondary PC (e.g. Dell Wyse thin client, mini PC, home server) |
+| **Best for** | Quick setup, single machine coding | Always-on 24/7 access from your laptop anywhere in the world |
+| **Network setup** | None — loopback only (`127.0.0.1`) | [Tailscale](https://tailscale.com) installed on both machines |
+| **Security** | Loopback only (no external traffic allowed) | Encrypted WireGuard mesh VPN + Bearer auth token |
+| **PC Sleep Impact** | If your laptop sleeps, proxy pauses | Server sleep disabled (`powercfg`); stays online 24/7 |
+| **One-Click Setup** | Double-click `setup-local.bat` | Double-click `setup-tailscale.bat` on the server PC |
+
+---
+
 ## Deployment Option 1: Local Setup (Single PC)
 
-Use this when you want to run the proxy on the same PC where you run your coding tools.
+Use this when you want to run the proxy on the same PC where you run OpenCode, Claude Code, or Cursor.
 
-### 1. Requirements
-- Python 3.10 or newer (no extra packages needed; standard library only).
-- An API key from [AgentRouter](https://agentrouter.org/register?aff=M69e) or your upstream provider.
+### Quickstart (1-Click Automated Setup)
 
-### 2. Configure `.env`
-Copy `.env.example` to `.env` in the project root:
+1. Double-click `setup-local.bat`.
+2. Enter your AgentRouter API key when prompted (`sk-...`).
+3. That's it! The script will:
+   - Create your `.env` configured for `127.0.0.1`.
+   - Run self-tests to ensure everything works.
+   - Install auto-start so the proxy automatically launches on Windows startup/reboot.
+   - Start the proxy immediately in the background (no black command window).
+   - Test connectivity at `http://127.0.0.1:4182/healthz`.
 
-```powershell
-Copy-Item .env.example .env
-```
+### Manual Setup (Alternative)
 
-Edit `.env`:
-```ini
-PROXY_UPSTREAM=https://agentrouter.org
-PROXY_UPSTREAM_API_KEY=your-provider-api-key-here
-PROXY_LISTEN_HOST=127.0.0.1
-PROXY_AUTH_TOKEN=
-```
+<details>
+<summary>Click to view manual step-by-step instructions</summary>
 
-### 3. Start the Proxy
-Double-click `start-proxy.bat` or run in terminal:
-
-```powershell
-.\start-proxy.bat
-# Or manually with Python:
-python .\agentrouter-proxy.py 4182
-```
+1. **Requirements:** Python 3.10 or newer.
+2. **Configure `.env`:** Copy `.env.example` to `.env`:
+   ```powershell
+   Copy-Item .env.example .env
+   ```
+   Edit `.env`:
+   ```ini
+   PROXY_UPSTREAM=https://agentrouter.org
+   PROXY_UPSTREAM_API_KEY=your-provider-api-key-here
+   PROXY_LISTEN_HOST=127.0.0.1
+   PROXY_AUTH_TOKEN=
+   ```
+3. **Start the Proxy:**
+   ```powershell
+   .\start-proxy.bat
+   # Or directly with Python:
+   python .\agentrouter-proxy.py 4182
+   ```
 
 The proxy starts on `http://127.0.0.1:4182`. Your local tools use base URL `http://127.0.0.1:4182/v1`.
+</details>
 
 ---
 
@@ -73,41 +94,41 @@ The proxy starts on `http://127.0.0.1:4182`. Your local tools use base URL `http
 
 Use this when you want to run the proxy 24/7 on a secondary PC (like a Dell Wyse, home lab mini-PC, Raspberry Pi, or VPS) and connect to it securely from your main laptop or desktop.
 
-### 1. Tailscale Setup
-1. Install [Tailscale](https://tailscale.com) on both machines.
-2. Sign in to the **same** Tailscale account on both machines.
-3. Note down the Tailscale IP of your server PC (e.g. `100.97.230.23`). You can find it by running:
+### Quickstart (1-Click Automated Setup)
+
+1. Ensure **Tailscale** is installed and signed in on both your server PC and your laptop.
+2. On your **server PC** (e.g. Dell Wyse), double-click:
    ```cmd
-   tailscale ip -4
+   setup-tailscale.bat
    ```
+3. The script will:
+   - Auto-detect your server's Tailscale IP (e.g. `100.97.230.23`).
+   - Prompt for your AgentRouter API key (`sk-...`) and client secret token (or auto-generate one).
+   - Permanently disable Windows sleep on AC power (`powercfg /change standby-timeout-ac 0`) so the server stays reachable 24/7 headless.
+   - Install auto-start into Windows Startup and Scheduled Tasks.
+   - Launch the proxy immediately in the background.
+   - Display a copy-paste ready OpenCode configuration block for your laptop!
 
-### 2. Configure the Proxy on the Server PC
-On the server PC (e.g. `wyse`), create `.env`:
+### Manual Setup (Alternative)
 
-```ini
-PROXY_UPSTREAM=https://agentrouter.org
-PROXY_UPSTREAM_API_KEY=your-upstream-provider-key
-PROXY_LISTEN_HOST=100.97.230.23
-PROXY_AUTH_TOKEN=choose-a-strong-client-secret-token
-```
+<details>
+<summary>Click to view manual step-by-step instructions</summary>
 
-> [!IMPORTANT]
-> - `PROXY_LISTEN_HOST` should be the server's **Tailscale IP** (never bind to `0.0.0.0` unless protected by a firewall).
-> - `PROXY_AUTH_TOKEN` is a secret token you invent for your clients to authenticate to the proxy. The proxy **refuses to start** on a non-loopback IP without this token!
-
-### 3. Launch on the Server PC
-You can start it using any of these methods:
-
-- **Method A (Easiest - 1 click):** Double-click `start-tailscale.bat`. It will auto-detect your Tailscale IP and start.
-- **Method B (Batch):** Run `.\start-proxy.bat --tailscale`.
-- **Method C (Command line):**
-  ```powershell
-  python .\agentrouter-proxy.py 4182
-  ```
-- **Method D (From your laptop via SSH):**
-  ```powershell
-  ssh wyse "cd C:\Users\GCLC\AgentRouter-Proxy && python agentrouter-proxy.py 4182"
-  ```
+1. **Tailscale Setup:**
+   Install Tailscale on both machines and note the server's IP via `tailscale ip -4`.
+2. **Configure `.env` on Server PC:**
+   ```ini
+   PROXY_UPSTREAM=https://agentrouter.org
+   PROXY_UPSTREAM_API_KEY=your-upstream-provider-key
+   PROXY_LISTEN_HOST=100.97.230.23
+   PROXY_AUTH_TOKEN=choose-a-strong-client-secret-token
+   ```
+3. **Launch on Server PC:**
+   Double-click `start-tailscale.bat` or run:
+   ```powershell
+   .\start-proxy.bat --tailscale
+   ```
+</details>
 
 ### 4. Verify Connection from Your Laptop
 From your laptop, test that the remote proxy is reachable over Tailscale:
@@ -136,18 +157,20 @@ Once your proxy is running (either locally at `127.0.0.1:4182` or remotely at `1
 
 In your `opencode.json` (per-project or in `~/.config/opencode/opencode.json`):
 
+#### When Connecting over Tailscale (Wyse / Server PC):
 ```json
 {
   "$schema": "https://opencode.ai/config.json",
   "provider": {
-    "agentrouter-proxy": {
-      "name": "AgentRouter Proxy",
+    "agentrouter-proxy-wyse": {
+      "name": "AgentRouter (Wyse Tailscale Proxy)",
       "npm": "@ai-sdk/openai-compatible",
       "options": {
         "baseURL": "http://100.97.230.23:4182/v1",
-        "apiKey": "choose-a-strong-client-secret-token"
+        "apiKey": "your-client-auth-token"
       },
       "models": {
+        "gpt-6.1-sol": { "name": "GPT 6.1 Sol" },
         "claude-opus-5": { "name": "Claude Opus 5" },
         "claude-opus-4-8": { "name": "Claude Opus 4.8" },
         "claude-opus-4-7": { "name": "Claude Opus 4.7" },
@@ -159,7 +182,38 @@ In your `opencode.json` (per-project or in `~/.config/opencode/opencode.json`):
   }
 }
 ```
-*(If running locally on the same PC, change `baseURL` to `http://127.0.0.1:4182/v1` and leave `apiKey` as any dummy string if `PROXY_AUTH_TOKEN` is unset).*
+
+#### When Running Locally (Same PC):
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "provider": {
+    "agentrouter-proxy-local": {
+      "name": "AgentRouter (Local Proxy)",
+      "npm": "@ai-sdk/openai-compatible",
+      "options": {
+        "baseURL": "http://127.0.0.1:4182/v1",
+        "apiKey": "local-proxy-token"
+      },
+      "models": {
+        "gpt-6.1-sol": { "name": "GPT 6.1 Sol" },
+        "claude-opus-5": { "name": "Claude Opus 5" },
+        "claude-opus-4-8": { "name": "Claude Opus 4.8" },
+        "claude-opus-4-7": { "name": "Claude Opus 4.7" },
+        "claude-opus-4-6": { "name": "Claude Opus 4.6" },
+        "gpt-5.5": { "name": "GPT 5.5" }
+      }
+    }
+  }
+}
+```
+
+> [!TIP]
+> **Why use this provider instead of `AgentRouter (Direct Responses API)`?**
+> When OpenCode uses direct Responses API (`/v1/responses`), multi-turn tool calling (e.g., `planning-with-files` in the `Build` agent) sends stateful item references. Because AgentRouter load balances across distinct Azure OpenAI clusters, subsequent turns often hit a different cluster, throwing:
+> `Error: The requested item was created under a different Azure OpenAI resource.`
+> 
+> By selecting **AgentRouter (Wyse Tailscale Proxy)** or **AgentRouter (Local Proxy)** with `npm: "@ai-sdk/openai-compatible"`, the proxy normalizes requests into standard stateless Chat Completions with self-contained context on every turn, completely eliminating this error!
 
 ### Claude Code
 
@@ -278,14 +332,17 @@ The proxy tracks token consumption (prompt tokens, completion tokens, total) for
 
 ### `GET /_usage`
 
-Returns a JSON breakdown of token usage:
+Returns a live JSON breakdown of token usage:
 
 ```powershell
-# Local proxy
-curl.exe -H "Authorization: Bearer local-proxy-token" http://127.0.0.1:4182/_usage
+# Local proxy (PowerShell)
+curl.exe http://127.0.0.1:4182/_usage
 
-# Wyse / Tailscale proxy
-curl.exe -H "Authorization: Bearer wyse-test-secret-2026" http://100.97.230.23:4182/_usage
+# Wyse / Tailscale proxy (PowerShell)
+curl.exe -H "Authorization: Bearer your-auth-token" http://100.97.230.23:4182/_usage
+
+# Or format as pretty table in PowerShell:
+(Invoke-RestMethod -Headers @{ Authorization = "Bearer your-auth-token" } -Uri "http://100.97.230.23:4182/_usage").today
 ```
 
 Example response:
