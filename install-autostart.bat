@@ -33,7 +33,7 @@ if not exist "%~dp0.env" (
 echo [*] Configuring Windows power settings (prevent system sleep on AC)...
 powercfg /change standby-timeout-ac 0 >nul 2>&1
 powercfg /change hibernate-timeout-ac 0 >nul 2>&1
-echo [OK] Sleep timeout on AC power disabled (always-on server mode).
+echo [OK] Sleep timeout on AC power disabled - always-on server mode.
 
 :: 4. Install into Windows Startup folder (Per-user auto-start on logon)
 set "STARTUP_FOLDER=%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup"
@@ -61,7 +61,7 @@ schtasks /create /tn "AgentRouterProxy" /tr "wscript.exe \"%~dp0run-silent.vbs\"
 if %errorlevel% equ 0 (
     echo [OK] Scheduled Task registered successfully.
 ) else (
-    echo [INFO] Scheduled Task registration skipped (Startup folder is active).
+    echo [INFO] Scheduled Task registration skipped - Startup folder is active.
 )
 
 :: 6. Launch proxy in background now

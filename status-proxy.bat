@@ -17,7 +17,7 @@ if %errorlevel% equ 0 (
     echo.
     echo [OK] Local health endpoint responded!
 ) else (
-    echo [INFO] Local port 4182 did not respond (proxy may be stopped or listening on Tailscale IP only).
+    echo [INFO] Local port 4182 did not respond - proxy may be listening on Tailscale IP only.
 )
 echo.
 
