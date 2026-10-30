@@ -1443,13 +1443,14 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     def _authorized(self):
-        """Authorize clients when a token is configured."""
+        """Authorize clients when a token is configured (supports comma-separated tokens)."""
         if not PROXY_AUTH_TOKEN:
             return True
         supplied = self.headers.get("Authorization", "")
-        expected = f"Bearer {PROXY_AUTH_TOKEN}"
-        if hmac.compare_digest(supplied, expected):
-            return True
+        valid_tokens = [t.strip() for t in PROXY_AUTH_TOKEN.split(",") if t.strip()]
+        for token in valid_tokens:
+            if hmac.compare_digest(supplied, f"Bearer {token}"):
+                return True
         err = b'{"error":{"message":"proxy authentication required"}}\n'
         self.send_response(401)
         self.send_header("WWW-Authenticate", "Bearer")

@@ -239,6 +239,17 @@ class ProxyBehaviorTests(unittest.TestCase):
             with self.assertRaises(urllib.error.HTTPError) as error:
                 urllib.request.urlopen(unauthorized)
             self.assertEqual(error.exception.code, 401)
+
+            # Test comma-separated multiple tokens
+            proxy.PROXY_AUTH_TOKEN = "token1, token2"
+            multi_req = urllib.request.Request(
+                url,
+                data=b'{"model":"demo","messages":[{"role":"user","content":"hello"}]}',
+                headers={"Authorization": "Bearer token2", "Content-Type": "application/json"},
+                method="POST",
+            )
+            with urllib.request.urlopen(multi_req) as response:
+                self.assertEqual(response.status, 200)
         finally:
             proxy_server.shutdown()
             upstream.shutdown()
