@@ -1,5 +1,13 @@
 # Provider-Neutral AI Proxy (AgentRouter & OpenAI / Anthropic Compatible)
 
+<p align="center">
+  <a href="https://agentrouter.org/register?aff=M69e"><img src="https://img.shields.io/badge/AgentRouter-Get%20API%20Key-blue?style=for-the-badge&logo=openai&logoColor=white" alt="AgentRouter Sign Up"></a>
+  <img src="https://img.shields.io/badge/Python-3.10%2B-brightgreen?style=for-the-badge&logo=python&logoColor=white" alt="Python 3.10+">
+  <img src="https://img.shields.io/badge/Tailscale-Ready-blueviolet?style=for-the-badge&logo=tailscale&logoColor=white" alt="Tailscale Ready">
+  <img src="https://img.shields.io/badge/Dependencies-Zero%20(Stdlib)-orange?style=for-the-badge" alt="Zero Dependencies">
+  <img src="https://img.shields.io/badge/License-MIT-green?style=for-the-badge" alt="License MIT">
+</p>
+
 A lightweight, zero-dependency Python proxy for AI coding assistants (OpenCode, Claude Code, Cursor, Cline, Roo Code) that routes requests through [AgentRouter](https://agentrouter.org/register?aff=M69e) or any OpenAI-compatible provider.
 
 It automatically handles:
@@ -406,10 +414,26 @@ The test suite includes:
 
 ---
 
-## Provider Referral
+## Provider Referral & Support
 
-If you need an AgentRouter account, support this project by signing up through the official link:
-👉 [Register at AgentRouter](https://agentrouter.org/register?aff=M69e)
+> [!TIP]
+> ### 🎁 Get Started with AgentRouter
+> If you don't have an AgentRouter account yet, you can support this open-source project by signing up through the official referral link below:
+> 
+> <p align="center">
+>   <a href="https://agentrouter.org/register?aff=M69e">
+>     <img src="https://img.shields.io/badge/AgentRouter-Create%20Account%20%26%20Get%20API%20Key-blue?style=for-the-badge&logo=openai&logoColor=white" alt="AgentRouter Sign Up">
+>   </a>
+> </p>
+> 
+> <p align="center">
+>   👉 <strong><a href="https://agentrouter.org/register?aff=M69e">https://agentrouter.org/register?aff=M69e</a></strong>
+> </p>
+> 
+> **Why use AgentRouter?**
+> - **Unified LLM Access:** Access state-of-the-art models including `gpt-6.1-sol`, `claude-opus-5`, `claude-opus-4-8`, `gpt-5.5`, and `glm-5.2` with high rate limits and resilient multi-cluster uptime.
+> - **Built for AI Coding Agents:** Seamless integration with OpenCode, Claude Code, Cursor, Cline, and Roo Code.
+> - **Support Ongoing Maintenance:** Signing up via this link helps support updates, upstream compatibility testing, and new feature development for this proxy. Thank you for your support!
 
 ---
 
