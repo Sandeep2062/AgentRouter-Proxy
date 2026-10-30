@@ -753,81 +753,114 @@ def responses_to_chat_completion(res_json: dict, model: str) -> dict:
     }
 
 
-def translate_responses_sse_line(line: bytes, resp_id: str = "chatcmpl-stream") -> list[bytes]:
-    if not line.startswith(b"data: "):
-        return []
-    raw = line[6:].strip()
-    if not raw or raw == b"[DONE]":
-        return [b"data: [DONE]\n\n"]
-    try:
-        data = json.loads(raw)
-    except Exception:
-        return []
+class ResponsesStreamTranslator:
+    """Stateful SSE translator from Responses API events to OpenAI Chat Completion chunks.
 
-    event_type = data.get("type")
-    if event_type == "response.output_text.delta":
-        delta = data.get("delta", "")
-        chunk = {
-            "id": resp_id,
-            "object": "chat.completion.chunk",
-            "choices": [{"index": 0, "delta": {"content": delta}}],
-        }
-        return [b"data: " + json.dumps(chunk, separators=(",", ":")).encode() + b"\n\n"]
-    elif event_type == "response.output_item.added":
-        item = data.get("item", {})
-        if item.get("type") == "function_call":
+    Maintains tool call index mapping across streaming chunks so parallel tool calls
+    each receive their own distinct index (0, 1, 2...) instead of concatenating into index 0.
+    """
+
+    def __init__(self, resp_id: str = "chatcmpl-stream"):
+        self.resp_id = resp_id
+        self.tool_indices = {}  # item_id -> 0, 1, ...
+        self.output_index_map = {}  # output_index -> 0, 1, ...
+
+    def translate_line(self, line: bytes) -> list[bytes]:
+        if not line.startswith(b"data: "):
+            return []
+        raw = line[6:].strip()
+        if not raw or raw == b"[DONE]":
+            return [b"data: [DONE]\n\n"]
+        try:
+            data = json.loads(raw)
+        except Exception:
+            return []
+
+        event_type = data.get("type")
+        if event_type == "response.output_text.delta":
+            delta = data.get("delta", "")
             chunk = {
-                "id": resp_id,
+                "id": self.resp_id,
+                "object": "chat.completion.chunk",
+                "choices": [{"index": 0, "delta": {"content": delta}}],
+            }
+            return [b"data: " + json.dumps(chunk, separators=(",", ":")).encode() + b"\n\n"]
+
+        elif event_type == "response.output_item.added":
+            item = data.get("item", {})
+            if item.get("type") == "function_call":
+                item_id = item.get("id") or item.get("call_id", "")
+                out_idx = data.get("output_index")
+                tool_idx = len(self.tool_indices)
+                if item_id:
+                    self.tool_indices[item_id] = tool_idx
+                if out_idx is not None:
+                    self.output_index_map[out_idx] = tool_idx
+
+                chunk = {
+                    "id": self.resp_id,
+                    "object": "chat.completion.chunk",
+                    "choices": [{
+                        "index": 0,
+                        "delta": {
+                            "tool_calls": [{
+                                "index": tool_idx,
+                                "id": item.get("call_id") or item.get("id", ""),
+                                "type": "function",
+                                "function": {
+                                    "name": item.get("name", ""),
+                                    "arguments": "",
+                                },
+                            }]
+                        },
+                    }],
+                }
+                return [b"data: " + json.dumps(chunk, separators=(",", ":")).encode() + b"\n\n"]
+
+        elif event_type == "response.function_call_arguments.delta":
+            delta = data.get("delta", "")
+            item_id = data.get("item_id")
+            out_idx = data.get("output_index")
+            tool_idx = self.tool_indices.get(item_id, self.output_index_map.get(out_idx, 0))
+
+            chunk = {
+                "id": self.resp_id,
                 "object": "chat.completion.chunk",
                 "choices": [{
                     "index": 0,
                     "delta": {
                         "tool_calls": [{
-                            "index": 0,
-                            "id": item.get("call_id") or item.get("id", ""),
-                            "type": "function",
-                            "function": {
-                                "name": item.get("name", ""),
-                                "arguments": "",
-                            },
+                            "index": tool_idx,
+                            "function": {"arguments": delta},
                         }]
                     },
                 }],
             }
             return [b"data: " + json.dumps(chunk, separators=(",", ":")).encode() + b"\n\n"]
-    elif event_type == "response.function_call_arguments.delta":
-        delta = data.get("delta", "")
-        chunk = {
-            "id": resp_id,
-            "object": "chat.completion.chunk",
-            "choices": [{
-                "index": 0,
-                "delta": {
-                    "tool_calls": [{
-                        "index": 0,
-                        "function": {"arguments": delta},
-                    }]
-                },
-            }],
-        }
-        return [b"data: " + json.dumps(chunk, separators=(",", ":")).encode() + b"\n\n"]
-    elif event_type in ("response.completed", "response.done"):
-        resp_obj = data.get("response") if isinstance(data.get("response"), dict) else data
-        has_tool_call = any(
-            isinstance(it, dict) and it.get("type") == "function_call"
-            for it in resp_obj.get("output", [])
-        )
-        finish_reason = "tool_calls" if has_tool_call else "stop"
-        stop_chunk = {
-            "id": resp_id,
-            "object": "chat.completion.chunk",
-            "choices": [{"index": 0, "delta": {}, "finish_reason": finish_reason}],
-        }
-        return [
-            b"data: " + json.dumps(stop_chunk, separators=(",", ":")).encode() + b"\n\n",
-            b"data: [DONE]\n\n",
-        ]
-    return []
+
+        elif event_type in ("response.completed", "response.done"):
+            resp_obj = data.get("response") if isinstance(data.get("response"), dict) else data
+            has_tool_call = bool(self.tool_indices) or any(
+                isinstance(it, dict) and it.get("type") == "function_call"
+                for it in resp_obj.get("output", [])
+            )
+            finish_reason = "tool_calls" if has_tool_call else "stop"
+            stop_chunk = {
+                "id": self.resp_id,
+                "object": "chat.completion.chunk",
+                "choices": [{"index": 0, "delta": {}, "finish_reason": finish_reason}],
+            }
+            return [
+                b"data: " + json.dumps(stop_chunk, separators=(",", ":")).encode() + b"\n\n",
+                b"data: [DONE]\n\n",
+            ]
+        return []
+
+
+def translate_responses_sse_line(line: bytes, resp_id: str = "chatcmpl-stream") -> list[bytes]:
+    """Stateless convenience wrapper for translate_line."""
+    translator = ResponsesStreamTranslator(resp_id)
+    return translator.translate_line(line)
 
 def normalize_upstream_path(path: str, obj: dict | None = None) -> tuple[str, dict]:
     """Map Anthropic-style requests to an OpenAI-compatible upstream path.
@@ -1437,9 +1470,10 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
 
         if is_converted_chat:
             resp_id = f"chatcmpl-{model}"
+            translator = ResponsesStreamTranslator(resp_id)
             if first_event is not None:
                 for line in first_event.splitlines():
-                    for tl in translate_responses_sse_line(line, resp_id):
+                    for tl in translator.translate_line(line):
                         try:
                             self.wfile.write(tl)
                             self.wfile.flush()
@@ -1447,7 +1481,7 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                             return
             for event in reader.read_events():
                 for line in event.splitlines():
-                    for tl in translate_responses_sse_line(line, resp_id):
+                    for tl in translator.translate_line(line):
                         try:
                             self.wfile.write(tl)
                             self.wfile.flush()

@@ -129,6 +129,47 @@ class ProxyBehaviorTests(unittest.TestCase):
                 self.assertIn("content", item)
                 self.assertIsNotNone(item["content"])
 
+
+    def test_parallel_tool_calls_streaming_indices(self):
+        translator = proxy.ResponsesStreamTranslator("chatcmpl-test")
+        events = [
+            b"data: " + json.dumps({"type": "response.output_item.added", "output_index": 0, "item": {"id": "fc_1", "type": "function_call", "name": "executing-plans", "call_id": "call_1"}}).encode() + b"\n\n",
+            b"data: " + json.dumps({"type": "response.function_call_arguments.delta", "output_index": 0, "item_id": "fc_1", "delta": '{"id":"executing-plans"}'}).encode() + b"\n\n",
+            b"data: " + json.dumps({"type": "response.output_item.added", "output_index": 1, "item": {"id": "fc_2", "type": "function_call", "name": "documentation-writer", "call_id": "call_2"}}).encode() + b"\n\n",
+            b"data: " + json.dumps({"type": "response.function_call_arguments.delta", "output_index": 1, "item_id": "fc_2", "delta": '{"id":"documentation-writer"}'}).encode() + b"\n\n",
+            b"data: " + json.dumps({"type": "response.completed", "response": {"output": [{"type": "function_call"}, {"type": "function_call"}]}}).encode() + b"\n\n",
+        ]
+
+        tool_calls = {}
+        finish_reason = None
+        for evt in events:
+            for line in evt.splitlines():
+                chunks = translator.translate_line(line)
+                for chunk_bytes in chunks:
+                    if chunk_bytes.startswith(b"data: ") and chunk_bytes.strip() != b"data: [DONE]":
+                        chunk = json.loads(chunk_bytes[6:].strip())
+                        choice = chunk["choices"][0]
+                        if "tool_calls" in choice.get("delta", {}):
+                            for tc in choice["delta"]["tool_calls"]:
+                                idx = tc["index"]
+                                if idx not in tool_calls:
+                                    tool_calls[idx] = {"name": "", "arguments": ""}
+                                if "function" in tc:
+                                    if "name" in tc["function"]:
+                                        tool_calls[idx]["name"] = tc["function"]["name"]
+                                    if "arguments" in tc["function"]:
+                                        tool_calls[idx]["arguments"] += tc["function"]["arguments"]
+                        if choice.get("finish_reason"):
+                            finish_reason = choice["finish_reason"]
+
+        self.assertEqual(finish_reason, "tool_calls")
+        self.assertEqual(len(tool_calls), 2)
+        # Verify tool 0 was NOT concatenated with tool 1
+        self.assertEqual(tool_calls[0]["name"], "executing-plans")
+        self.assertEqual(tool_calls[0]["arguments"], '{"id":"executing-plans"}')
+        self.assertEqual(tool_calls[1]["name"], "documentation-writer")
+        self.assertEqual(tool_calls[1]["arguments"], '{"id":"documentation-writer"}')
+
     def test_anthropic_payload_is_converted(self):
         payload = {
             "model": "demo-model",
