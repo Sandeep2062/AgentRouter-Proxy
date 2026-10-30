@@ -385,11 +385,32 @@ All settings can be configured via `.env` file or environment variables:
 
 ---
 
-## Token Usage Tracking
+## Token Usage Tracking & Live Speed Monitor
 
-The proxy tracks token consumption (prompt tokens, completion tokens, total) for every non-streaming request and persists them to `usage.json` (never committed to git).
+The proxy tracks token consumption (prompt tokens, completion tokens, total) across all models and persists them to `usage.json` (never committed to git).
 
-### `GET /_usage`
+### 1. 1-Click Desktop Usage Dashboard (`view-usage.bat`)
+
+Double-click `view-usage.bat` on your laptop to see an instant dashboard:
+- Today's Prompt, Completion, and Total tokens.
+- Per-model breakdown (`gpt-6.1-sol`, `gpt-6-astra`, `gpt-5.6-sol`, `claude-opus-5-5`).
+- Yesterday, This Month, and All-Time totals.
+
+#### Real-Time `tok/s` Watch Mode:
+To monitor streaming tokens and live tokens-per-second (`tok/s`) while coding in OpenCode or Cursor:
+```powershell
+.\view-usage.bat -Watch
+```
+This updates every 2 seconds live, calculating real-time output speed (`tok/s`).
+
+### 2. Built-in OpenCode Live `tok/s`
+In OpenCode's chat window, OpenCode automatically calculates and displays the exact generation speed and duration in the message header:
+```text
+Build · GPT 6.1 Sol (Wyse Proxy) · 5m 27s · 25.4 tok/s
+```
+And shows active context tokens at the bottom right (`82.8K (41%)`).
+
+### 3. API Endpoints (`GET /_usage` and `GET /_stats`)
 
 Returns a live JSON breakdown of token usage:
 
