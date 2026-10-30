@@ -239,6 +239,84 @@ _stats = {
     "anti_loop_triggered": 0,
 }
 
+
+# ---------------------------------------------------------------------------
+# Token Usage Tracker  (persisted to usage.json next to proxy script)
+# ---------------------------------------------------------------------------
+
+_USAGE_PATH = os.path.join(_SCRIPT_DIR, "usage.json")
+_usage_lock = threading.Lock()
+
+
+def _load_usage() -> dict:
+    """Load usage.json, return empty structure on missing/corrupt file."""
+    try:
+        with open(_USAGE_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, dict):
+            return data
+    except Exception:
+        pass
+    return {}
+
+
+def _save_usage(data: dict) -> None:
+    """Atomically write usage.json."""
+    try:
+        tmp = _USAGE_PATH + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+        os.replace(tmp, _USAGE_PATH)
+    except Exception:
+        pass
+
+
+def record_tokens(model: str, prompt_tokens: int, completion_tokens: int, total_tokens: int) -> None:
+    """Record token usage into usage.json keyed by YYYY-MM-DD and YYYY-MM."""
+    today = datetime.datetime.now().strftime("%Y-%m-%d")
+    month = today[:7]  # YYYY-MM
+    with _usage_lock:
+        data = _load_usage()
+        # Per-day bucket
+        day_bucket = data.setdefault("days", {}).setdefault(today, {})
+        day_bucket["prompt_tokens"] = day_bucket.get("prompt_tokens", 0) + prompt_tokens
+        day_bucket["completion_tokens"] = day_bucket.get("completion_tokens", 0) + completion_tokens
+        day_bucket["total_tokens"] = day_bucket.get("total_tokens", 0) + total_tokens
+        day_bucket["requests"] = day_bucket.get("requests", 0) + 1
+        # Per-model breakdown inside day
+        models_day = day_bucket.setdefault("models", {}).setdefault(model, {})
+        models_day["total_tokens"] = models_day.get("total_tokens", 0) + total_tokens
+        models_day["requests"] = models_day.get("requests", 0) + 1
+        # Per-month bucket
+        month_bucket = data.setdefault("months", {}).setdefault(month, {})
+        month_bucket["prompt_tokens"] = month_bucket.get("prompt_tokens", 0) + prompt_tokens
+        month_bucket["completion_tokens"] = month_bucket.get("completion_tokens", 0) + completion_tokens
+        month_bucket["total_tokens"] = month_bucket.get("total_tokens", 0) + total_tokens
+        month_bucket["requests"] = month_bucket.get("requests", 0) + 1
+        _save_usage(data)
+
+
+def get_usage_summary() -> dict:
+    """Return usage summary: today, yesterday, this month, last month, all-time."""
+    today = datetime.datetime.now().strftime("%Y-%m-%d")
+    yesterday = (datetime.datetime.now() - datetime.timedelta(days=1)).strftime("%Y-%m-%d")
+    this_month = today[:7]
+    last_month_dt = datetime.datetime.now().replace(day=1) - datetime.timedelta(days=1)
+    last_month = last_month_dt.strftime("%Y-%m")
+    with _usage_lock:
+        data = _load_usage()
+    days = data.get("days", {})
+    months = data.get("months", {})
+    all_time_tokens = sum(v.get("total_tokens", 0) for v in months.values())
+    all_time_requests = sum(v.get("requests", 0) for v in months.values())
+    return {
+        "today": days.get(today, {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "requests": 0}),
+        "yesterday": days.get(yesterday, {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "requests": 0}),
+        "this_month": months.get(this_month, {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "requests": 0}),
+        "last_month": months.get(last_month, {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "requests": 0}),
+        "all_time": {"total_tokens": all_time_tokens, "requests": all_time_requests},
+    }
+
 # ---------------------------------------------------------------------------
 # Blocked Content Logger
 # ---------------------------------------------------------------------------
@@ -1029,6 +1107,12 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             self.wfile.write(body)
             self.wfile.flush()
             return
+        if self.path == "/_usage":
+            if not self._authorized():
+                return
+            self._serve_usage()
+            return
+
         if self.path == "/_stats":
             if not self._authorized():
                 return
@@ -1045,6 +1129,17 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         self.end_headers()
 
     # ------ Stats endpoint ------
+
+    def _serve_usage(self):
+        """``GET /_usage`` — return token usage by day/month as JSON."""
+        summary = get_usage_summary()
+        data = json.dumps(summary, indent=2).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+        self.wfile.flush()
 
     def _serve_stats(self):
         """``GET /_stats`` — return proxy statistics as JSON."""
@@ -1377,9 +1472,20 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         self.wfile.write(cleaned)
         self.wfile.flush()
 
-        # Reset block counter on success
+        # Record token usage from response body
         if not is_content_blocked(buf):
             _reset_block_counter(model)
+            try:
+                resp_obj = json.loads(cleaned)
+                usage_data = resp_obj.get("usage") or {}
+                record_tokens(
+                    model=model,
+                    prompt_tokens=int(usage_data.get("prompt_tokens", 0)),
+                    completion_tokens=int(usage_data.get("completion_tokens", 0)),
+                    total_tokens=int(usage_data.get("total_tokens", 0)),
+                )
+            except Exception:
+                pass
 
     # ------ HTTP error handler ------
 
@@ -1502,6 +1608,7 @@ if __name__ == "__main__":
     print(f"  SSE buffered reading:     {SSE_CHUNK_SIZE}b chunks")
     print(f"  Incoming auth:            {'ENABLED' if PROXY_AUTH_TOKEN else 'local-only'}")
     print(f"  Stats endpoint:           http://localhost:{PORT}/_stats")
+    print(f"  Usage endpoint:           http://localhost:{PORT}/_usage")
     print(f"  Debug mode:               {'ON' if os.environ.get('AGENTROUTER_DEBUG') == '1' else 'OFF'}")
     print()
     try:

@@ -121,6 +121,9 @@ curl.exe -i -H "Authorization: Bearer choose-a-strong-client-secret-token" http:
 
 # 3. Check proxy stats
 curl.exe -i -H "Authorization: Bearer choose-a-strong-client-secret-token" http://100.97.230.23:4182/_stats
+
+# 4. Check token usage (today, yesterday, monthly, all-time)
+curl.exe -H "Authorization: Bearer choose-a-strong-client-secret-token" http://100.97.230.23:4182/_usage
 ```
 
 ---
@@ -199,6 +202,26 @@ print(response.choices[0].message.content)
 To keep the proxy running 24/7 as a background service on your server PC (e.g. Dell Wyse thin client or home server):
 
 ### 1. One-Click Automated Setup
+
+**Option A — Tailscale/server PC (run once on the machine that will serve the proxy):**
+
+Double-click `setup-tailscale.bat` on your server/Wyse PC. It will:
+1. Auto-detect your Tailscale IP and write `.env` with sensible defaults.
+2. Create `start-tailscale.bat` configured to your Tailscale IP.
+3. Install the silent auto-start launcher + Scheduled Task.
+4. Disable sleep on AC power.
+5. Launch the proxy immediately in the background.
+6. Print an OpenCode configuration snippet to paste into `opencode.json`.
+
+**Option B — Local setup (run on the same PC you code on):**
+
+Double-click `setup-local.bat`. It will:
+1. Create `.env` bound to `127.0.0.1` with a local auth token.
+2. Install auto-start into `%APPDATA%\Startup`.
+3. Start the proxy in the background.
+
+**Option C — Manual installer (legacy):**
+
 On the server PC, double-click:
 ```cmd
 install-autostart.bat
@@ -249,13 +272,47 @@ All settings can be configured via `.env` file or environment variables:
 
 ---
 
+## Token Usage Tracking
+
+The proxy tracks token consumption (prompt tokens, completion tokens, total) for every non-streaming request and persists them to `usage.json` (never committed to git).
+
+### `GET /_usage`
+
+Returns a JSON breakdown of token usage:
+
+```powershell
+# Local proxy
+curl.exe -H "Authorization: Bearer local-proxy-token" http://127.0.0.1:4182/_usage
+
+# Wyse / Tailscale proxy
+curl.exe -H "Authorization: Bearer wyse-test-secret-2026" http://100.97.230.23:4182/_usage
+```
+
+Example response:
+```json
+{
+  "today": { "prompt_tokens": 1200, "completion_tokens": 480, "total_tokens": 1680 },
+  "yesterday": { "prompt_tokens": 4300, "completion_tokens": 1700, "total_tokens": 6000 },
+  "this_month": { "prompt_tokens": 22000, "completion_tokens": 9100, "total_tokens": 31100 },
+  "last_month": { "prompt_tokens": 95000, "completion_tokens": 38000, "total_tokens": 133000 },
+  "all_time": { "prompt_tokens": 117000, "completion_tokens": 47100, "total_tokens": 164100 },
+  "by_model": {
+    "gpt-6.1-sol": { "prompt_tokens": 117000, "completion_tokens": 47100, "total_tokens": 164100 }
+  }
+}
+```
+
+> **Note:** Streaming responses (`stream: true`) do not include per-chunk token counts from AgentRouter, so those requests are not counted. Non-streaming requests are fully counted.
+
+---
+
 ## Testing & Quality Assurance
 
 Run the test suite:
 
 ```powershell
-python -m py_compile agentrouter-proxy.py agentrouter-proxy-openai.py agentrouter-proxy-anthropic.py
-python -m unittest discover -v
+pip install pytest
+python -m pytest test_proxy.py -v
 ```
 
 The test suite includes:
