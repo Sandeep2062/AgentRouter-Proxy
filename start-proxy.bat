@@ -177,7 +177,7 @@ echo   Client Key: !PROXY_AUTH_TOKEN!
 echo   Stats URL:  http://!PROXY_LISTEN_HOST!:!PORT!/_stats
 echo   Healthz:    http://!PROXY_LISTEN_HOST!:!PORT!/healthz
 ) else (
-echo   Client Key: None (local loopback mode)
+echo   Client Key: None - local loopback mode
 echo   Stats URL:  http://localhost:!PORT!/_stats
 echo   Healthz:    http://localhost:!PORT!/healthz
 )
@@ -185,7 +185,7 @@ echo ===================================================
 echo.
 if not "!PROXY_LISTEN_HOST!"=="127.0.0.1" (
 echo [Remote Access Instructions]
-echo   Configure your client tool (OpenCode, Claude Code, Cursor, Cline) with:
+echo   Configure your client tool - OpenCode, Claude Code, Cursor, Cline - with:
 echo     Base URL: http://!PROXY_LISTEN_HOST!:!PORT!/v1
 echo     API Key:  !PROXY_AUTH_TOKEN!
 echo.
