@@ -165,6 +165,7 @@ MAX_CONSECUTIVE_BLOCKS = 3
 SSE_CHUNK_SIZE = 8192
 
 SUPPORTED_MODELS = {
+    "claude-opus-5-5",
     "claude-opus-5",
     "claude-opus-4-8",
     "claude-opus-4-7",
@@ -178,6 +179,7 @@ SUPPORTED_MODELS = {
 }
 
 MODEL_ALIASES = {
+    "claude-opus-5.5": "claude-opus-5-5",
     "claude-opus-4.8": "claude-opus-4-8",
     "claude-opus-4.7": "claude-opus-4-7",
     "claude-opus-4.6": "claude-opus-4-6",
