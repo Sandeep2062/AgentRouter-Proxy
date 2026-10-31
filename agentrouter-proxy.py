@@ -164,6 +164,17 @@ MAX_CONSECUTIVE_BLOCKS = 3
 # SSE read chunk size (bytes) — instead of reading byte-by-byte
 SSE_CHUNK_SIZE = 8192
 
+# Fallback models returned if upstream models endpoint is unavailable
+FALLBACK_MODELS = {
+    "object": "list",
+    "data": [
+        {"id": "gpt-6.1-sol", "object": "model", "created": 1700000000, "owned_by": "custom"},
+        {"id": "gpt-5.6-sol", "object": "model", "created": 1700000000, "owned_by": "custom"},
+        {"id": "gpt-6-astra", "object": "model", "created": 1700000000, "owned_by": "custom"},
+    ],
+    "success": True,
+}
+
 SUPPORTED_MODELS = {
     "claude-opus-5-5",
     "claude-opus-5",
@@ -1393,6 +1404,8 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             body = b'{"status":"ok"}\n'
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.send_header("Access-Control-Allow-Headers", "*")
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
@@ -1409,6 +1422,17 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                 return
             self._serve_stats()
             return
+
+        if self.path in ("/v1/models", "/models"):
+            if not self._authorized():
+                return
+            try:
+                self._proxy()
+            except Exception as e:
+                sys.stderr.write(f"[ar] /models upstream failed ({e}), returning fallback models\n")
+                self._serve_fallback_models()
+            return
+
         self._proxy()
 
     def do_OPTIONS(self):
@@ -1427,6 +1451,8 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         data = json.dumps(summary, indent=2).encode()
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Headers", "*")
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
         self.wfile.write(data)
@@ -1438,9 +1464,23 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             data = json.dumps(_stats, indent=2).encode()
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Headers", "*")
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
         self.wfile.write(data)
+
+    def _serve_fallback_models(self):
+        """Return healthy fallback model list for Kilo Code / OpenCode."""
+        data = json.dumps(FALLBACK_MODELS, indent=2).encode("utf-8") + b"\n"
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Headers", "*")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+        self.wfile.flush()
 
     def _authorized(self):
         """Authorize clients when a token is configured (supports comma-separated tokens)."""
@@ -1451,10 +1491,12 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         for token in valid_tokens:
             if hmac.compare_digest(supplied, f"Bearer {token}"):
                 return True
-        err = b'{"error":{"message":"proxy authentication required"}}\n'
+        err = b'{"error":{"message":"proxy authentication required","type":"unauthorized","code":401}}\n'
         self.send_response(401)
         self.send_header("WWW-Authenticate", "Bearer")
         self.send_header("Content-Type", "application/json")
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Headers", "*")
         self.send_header("Content-Length", str(len(err)))
         self.end_headers()
         self.wfile.write(err)
@@ -1468,9 +1510,11 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             return
         content_len = int(self.headers.get("Content-Length", 0))
         if content_len > MAX_BODY_BYTES:
-            err = b'{"error":{"message":"request body too large"}}\n'
+            err = b'{"error":{"message":"request body too large","type":"payload_too_large","code":413}}\n'
             self.send_response(413)
             self.send_header("Content-Type", "application/json")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.send_header("Access-Control-Allow-Headers", "*")
             self.send_header("Content-Length", str(len(err)))
             self.end_headers()
             self.wfile.write(err)
@@ -1568,9 +1612,21 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
 
         except Exception as e:
             sys.stderr.write(f"[ar] EXCEPTION: {e}\n")
-            err_data = json.dumps({"error": str(e)}).encode() + b"\n"
+            if (target_path or self.path) in ("/v1/models", "/models"):
+                self._serve_fallback_models()
+                return
+            err_obj = {
+                "error": {
+                    "message": f"AgentRouter Proxy Gateway Error: {e}",
+                    "type": "proxy_gateway_error",
+                    "code": 502,
+                }
+            }
+            err_data = json.dumps(err_obj).encode("utf-8") + b"\n"
             self.send_response(502)
             self.send_header("Content-Type", "application/json")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.send_header("Access-Control-Allow-Headers", "*")
             self.send_header("Content-Length", str(len(err_data)))
             self.end_headers()
             self.wfile.write(err_data)
@@ -1613,8 +1669,10 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
 
         # Now send response headers (we know the first event is OK)
         self.send_response(resp.status)
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Headers", "*")
         for k, v in resp.headers.items():
-            if k.lower() not in ("transfer-encoding", "connection"):
+            if k.lower() not in ("transfer-encoding", "connection", "access-control-allow-origin", "access-control-allow-headers"):
                 self.send_header(k, v)
         self.end_headers()
 
@@ -1775,8 +1833,10 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         else:
             cleaned = clean_nonstream_body(buf)
         self.send_response(resp.status)
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Headers", "*")
         for k, v in resp.headers.items():
-            if k.lower() not in ("transfer-encoding", "connection", "content-length"):
+            if k.lower() not in ("transfer-encoding", "connection", "content-length", "access-control-allow-origin", "access-control-allow-headers"):
                 self.send_header(k, v)
         self.send_header("Content-Length", str(len(cleaned)))
         self.end_headers()
@@ -1801,7 +1861,29 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
     # ------ HTTP error handler ------
 
     def _handle_http_error(self, e, err_body, body, model, is_retry, debug, target_path):
-        """Handle HTTP errors, with retry logic for content-blocked."""
+        """Handle HTTP errors, with retry logic for content-blocked and transient upstream glitches."""
+        # Fallback for models endpoint on error
+        if (target_path or self.path) in ("/v1/models", "/models"):
+            sys.stderr.write(f"[ar] /models upstream HTTP {e.code}, returning fallback models\n")
+            self._serve_fallback_models()
+            return
+
+        # Transient upstream failure retry (429 rate limit, 502 bad gateway, 503 no channel, 504 timeout)
+        if not is_retry and e.code in (429, 502, 503, 504) and body:
+            sys.stderr.write(
+                f"[ar] [WARN] transient upstream error HTTP {e.code}, "
+                f"retrying once after 1s...\n"
+            )
+            import time
+            time.sleep(1.0)
+            self._attempt_request(
+                body,
+                is_retry=True,
+                debug=debug,
+                target_path=target_path,
+            )
+            return
+
         # Content-blocked retry (HTTP error)
         if not is_retry and is_content_blocked(err_body) and body:
             sys.stderr.write(
@@ -1847,8 +1929,10 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             f"{err_body.decode(errors='replace')[:500]}\n"
         )
         self.send_response(e.code)
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Headers", "*")
         for k, v in e.headers.items():
-            if k.lower() not in ("transfer-encoding", "connection"):
+            if k.lower() not in ("transfer-encoding", "connection", "access-control-allow-origin", "access-control-allow-headers"):
                 self.send_header(k, v)
         self.end_headers()
         self.wfile.write(err_body)

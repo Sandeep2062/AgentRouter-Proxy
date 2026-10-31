@@ -361,6 +361,28 @@ class ProxyBehaviorTests(unittest.TestCase):
         self.assertEqual(c1_empty["choices"][0]["finish_reason"], "stop")
         self.assertIn("Discovery and checks completed", c1_empty["choices"][0]["delta"]["content"])
 
+    def test_models_endpoint_fallback(self):
+        # When upstream is unreachable or errors, /v1/models serves healthy fallback models
+        proxy.UPSTREAM = "http://127.0.0.1:1"  # Unreachable port
+        proxy.PROXY_AUTH_TOKEN = ""
+        proxy_server = proxy.ThreadedHTTPServer(("127.0.0.1", 0), proxy.ProxyHandler)
+        thread = threading.Thread(target=proxy_server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            url = f"http://127.0.0.1:{proxy_server.server_port}/v1/models"
+            request = urllib.request.Request(url, method="GET")
+            with urllib.request.urlopen(request) as response:
+                self.assertEqual(response.status, 200)
+                self.assertEqual(response.headers.get("Access-Control-Allow-Origin"), "*")
+                data = json.loads(response.read().decode())
+                self.assertIn("data", data)
+                model_ids = [m["id"] for m in data["data"]]
+                self.assertIn("gpt-6.1-sol", model_ids)
+                self.assertIn("gpt-5.6-sol", model_ids)
+        finally:
+            proxy_server.shutdown()
+            proxy_server.server_close()
+
 
 if __name__ == "__main__":
     unittest.main()
