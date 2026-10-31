@@ -38,6 +38,7 @@ import json
 import threading
 import os
 import datetime
+import time
 import collections
 import hmac
 import subprocess
@@ -1412,6 +1413,21 @@ def is_rate_limit_or_server_error(data: bytes) -> bool:
     return False
 
 
+def is_tpm_rate_limit(data: bytes) -> bool:
+    """Check specifically for token-per-minute (TPM) or rate-limit saturation."""
+    if not data:
+        return False
+    lower = data.lower()
+    return any(k in lower for k in (
+        b"rate limit",
+        b"rate_limit",
+        b"exceeded token rate limit",
+        b"token rate limit",
+        b"too many requests",
+        b"tpm",
+    ))
+
+
 def clean_sse_line(line: bytes):
     """Filter problematic SSE lines from the stream.
 
@@ -1808,10 +1824,13 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         # Check if first event is rate-limited or transient upstream server error (e.g. Azure TPM in eastus2)
         if first_event is not None and is_rate_limit_or_server_error(first_event) and body and not is_retry:
             alt_key = get_alternate_upstream_key(upstream_key) if upstream_key else None
+            if is_tpm_rate_limit(first_event):
+                sys.stderr.write("[ar] [BACKOFF] Azure TPM rate limit detected in first SSE event, sleeping 5s to replenish tokens...\n")
+                time.sleep(5.0)
             if alt_key and alt_key != upstream_key:
                 sys.stderr.write(
                     f"[ar] [FAILOVER] rate-limit in first SSE event on key ...{upstream_key[-6:]}, "
-                    f"switching to alternate key ...{alt_key[-6:]} and retrying immediately...\n"
+                    f"switching to alternate key ...{alt_key[-6:]} and retrying...\n"
                 )
                 self._attempt_request(
                     body,
@@ -1824,10 +1843,9 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             else:
                 sys.stderr.write(
                     "[ar] [WARN] rate-limit or transient upstream error in first SSE event, "
-                    "backing off 2.5s and retrying...\n"
+                    "backing off 3s and retrying...\n"
                 )
-                import time
-                time.sleep(2.5)
+                time.sleep(3.0)
                 self._attempt_request(
                     body,
                     is_retry=True,
@@ -1949,10 +1967,13 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         # Check rate-limit or server error in 200 response body
         if not is_retry and is_rate_limit_or_server_error(buf) and body:
             alt_key = get_alternate_upstream_key(upstream_key) if upstream_key else None
+            if is_tpm_rate_limit(buf):
+                sys.stderr.write("[ar] [BACKOFF] Azure TPM rate limit detected in response body, sleeping 5s to replenish tokens...\n")
+                time.sleep(5.0)
             if alt_key and alt_key != upstream_key:
                 sys.stderr.write(
                     f"[ar] [FAILOVER] rate-limit in response body on key ...{upstream_key[-6:]}, "
-                    f"switching to alternate key ...{alt_key[-6:]} and retrying immediately...\n"
+                    f"switching to alternate key ...{alt_key[-6:]} and retrying...\n"
                 )
                 self._attempt_request(
                     body,
@@ -1960,6 +1981,20 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                     debug=debug,
                     target_path=target_path,
                     upstream_key=alt_key,
+                )
+                return
+            else:
+                sys.stderr.write(
+                    "[ar] [WARN] rate-limit or transient upstream error in response body, "
+                    "backing off 3s and retrying...\n"
+                )
+                time.sleep(3.0)
+                self._attempt_request(
+                    body,
+                    is_retry=True,
+                    debug=debug,
+                    target_path=target_path,
+                    upstream_key=upstream_key,
                 )
                 return
 
@@ -2059,10 +2094,13 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         # Transient upstream failure retry (429 rate limit, 502 bad gateway, 503 no channel, 504 timeout)
         if not is_retry and (e.code in (429, 502, 503, 504) or is_rate_limit_or_server_error(err_body)) and body:
             alt_key = get_alternate_upstream_key(upstream_key) if upstream_key else None
+            if e.code == 429 or is_tpm_rate_limit(err_body):
+                sys.stderr.write("[ar] [BACKOFF] HTTP 429 / Azure TPM rate limit, sleeping 5s to replenish tokens...\n")
+                time.sleep(5.0)
             if alt_key and alt_key != upstream_key:
                 sys.stderr.write(
                     f"[ar] [FAILOVER] HTTP {e.code} on key ...{upstream_key[-6:]}, "
-                    f"switching to alternate key ...{alt_key[-6:]} and retrying immediately...\n"
+                    f"switching to alternate key ...{alt_key[-6:]} and retrying...\n"
                 )
                 self._attempt_request(
                     body,
@@ -2075,10 +2113,9 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             else:
                 sys.stderr.write(
                     f"[ar] [WARN] transient upstream error HTTP {e.code}, "
-                    f"retrying once after 2.5s backoff...\n"
+                    f"retrying once after 3s backoff...\n"
                 )
-                import time
-                time.sleep(2.5)
+                time.sleep(3.0)
                 self._attempt_request(
                     body,
                     is_retry=True,
