@@ -1742,6 +1742,17 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             body is not None
             and b'"stream":true' in body.replace(b" ", b"")
         )
+        if body:
+            try:
+                b_obj = json.loads(body)
+                sys.stderr.write(
+                    f"[ar] req: path={target_path or self.path} "
+                    f"model={b_obj.get('model')} bytes={len(body)} "
+                    f"max_out={b_obj.get('max_output_tokens') or b_obj.get('max_tokens')} "
+                    f"stream={is_stream} retry={is_retry} key=...{upstream_key[-6:]}\n"
+                )
+            except Exception:
+                pass
 
         # Extract model for anti-loop tracking
         model = "unknown"
@@ -1966,6 +1977,7 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
 
         # Check rate-limit or server error in 200 response body
         if not is_retry and is_rate_limit_or_server_error(buf) and body:
+            sys.stderr.write(f"[ar] Rate limit response: {buf.decode(errors='replace')[:300]}\n")
             alt_key = get_alternate_upstream_key(upstream_key) if upstream_key else None
             if is_tpm_rate_limit(buf):
                 sys.stderr.write("[ar] [BACKOFF] Azure TPM rate limit detected in response body, sleeping 5s to replenish tokens...\n")
