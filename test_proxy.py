@@ -423,6 +423,35 @@ class ProxyBehaviorTests(unittest.TestCase):
         self.assertEqual(res["choices"][0]["message"]["content"], "Hello user")
         self.assertEqual(res["choices"][0]["message"]["reasoning_content"], "Deep thinking trace")
 
+    def test_upstream_multi_key_rotation_and_failover(self):
+        # Test parsing, round-robin, and failover across multiple upstream keys
+        keys = proxy.parse_upstream_keys("mock-key-1, mock-key-2 , mock-key-3")
+        self.assertEqual(keys, ["mock-key-1", "mock-key-2", "mock-key-3"])
+
+        orig_api_key = proxy.API_KEY
+        orig_keys = proxy.UPSTREAM_API_KEYS
+        try:
+            proxy.UPSTREAM_API_KEYS = ["mock-key-a", "mock-key-b"]
+            proxy.API_KEY = "mock-key-a"
+            proxy._key_index = 0
+
+            # Round-robin checks
+            k1 = proxy.get_next_upstream_key()
+            k2 = proxy.get_next_upstream_key()
+            k3 = proxy.get_next_upstream_key()
+            self.assertEqual(k1, "mock-key-a")
+            self.assertEqual(k2, "mock-key-b")
+            self.assertEqual(k3, "mock-key-a")
+
+            # Failover checks
+            alt_a = proxy.get_alternate_upstream_key("mock-key-a")
+            alt_b = proxy.get_alternate_upstream_key("mock-key-b")
+            self.assertEqual(alt_a, "mock-key-b")
+            self.assertEqual(alt_b, "mock-key-a")
+        finally:
+            proxy.UPSTREAM_API_KEYS = orig_keys
+            proxy.API_KEY = orig_api_key
+
 
 if __name__ == "__main__":
     unittest.main()

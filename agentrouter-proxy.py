@@ -136,9 +136,42 @@ UPSTREAM = os.environ.get(
     "PROXY_UPSTREAM", os.environ.get("AGENTROUTER_UPSTREAM", "https://agentrouter.org")
 ).strip().rstrip("/")
 PORT = int(sys.argv[1]) if len(sys.argv) > 1 and sys.argv[1].isdigit() else 4182
-API_KEY = os.environ.get(
-    "PROXY_UPSTREAM_API_KEY", os.environ.get("AGENTROUTER_API_KEY", "")
-).strip()
+
+def parse_upstream_keys(raw: str) -> list[str]:
+    return [k.strip() for k in raw.split(",") if k.strip()]
+
+UPSTREAM_API_KEYS = parse_upstream_keys(
+    os.environ.get("PROXY_UPSTREAM_API_KEY", os.environ.get("AGENTROUTER_API_KEY", ""))
+)
+API_KEY = UPSTREAM_API_KEYS[0] if UPSTREAM_API_KEYS else ""
+
+_key_index = 0
+_key_lock = threading.Lock()
+
+def get_next_upstream_key() -> str:
+    global _key_index
+    if API_KEY and API_KEY not in UPSTREAM_API_KEYS:
+        return API_KEY
+    keys = UPSTREAM_API_KEYS if UPSTREAM_API_KEYS else ([API_KEY] if API_KEY else [])
+    if not keys:
+        return ""
+    with _key_lock:
+        key = keys[_key_index % len(keys)]
+        _key_index = (_key_index + 1) % len(keys)
+        return key
+
+def get_alternate_upstream_key(current_key: str) -> str:
+    """Return an alternate key from the pool if available (for failover)."""
+    if API_KEY and API_KEY not in UPSTREAM_API_KEYS:
+        return current_key
+    keys = UPSTREAM_API_KEYS if UPSTREAM_API_KEYS else ([API_KEY] if API_KEY else [])
+    if len(keys) <= 1:
+        return current_key
+    for k in keys:
+        if k != current_key:
+            return k
+    return current_key
+
 LISTEN_HOST = os.environ.get("PROXY_LISTEN_HOST", "127.0.0.1").strip()
 if LISTEN_HOST.lower() in ("tailscale", "ts"):
     try:
@@ -1657,7 +1690,7 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
 
     # ------ Build upstream headers ------
 
-    def _build_headers(self, body):
+    def _build_headers(self, body, upstream_key=None):
         """Construct headers for the upstream AgentRouter request."""
         hdrs = {}
         for k, v in self.headers.items():
@@ -1665,7 +1698,8 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             if kl not in ("host", "connection", "transfer-encoding",
                           "accept-encoding", "authorization"):
                 hdrs[k] = v
-        hdrs["Authorization"] = f"{UPSTREAM_AUTH_SCHEME} {API_KEY}"
+        key = upstream_key or get_next_upstream_key()
+        hdrs["Authorization"] = f"{UPSTREAM_AUTH_SCHEME} {key}"
         hdrs["User-Agent"] = USER_AGENT
         # Force uncompressed responses so we can filter SSE line-by-line.
         hdrs["Accept-Encoding"] = "identity"
@@ -1675,14 +1709,15 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
 
     # ------ Upstream request + retry logic ------
 
-    def _attempt_request(self, body, *, is_retry, debug=False, target_path=None):
-        """Send request to AgentRouter.  Retries **once** on content-blocked
-        with a trimmed context (system message + last user message only).
+    def _attempt_request(self, body, *, is_retry, debug=False, target_path=None, upstream_key=None):
+        """Send request to AgentRouter. Retries once on content-blocked or rate-limit/transient error.
 
         For streaming requests, buffers the first SSE event before sending
-        HTTP response headers to allow early content-block detection.
+        HTTP response headers to allow early content-block or rate-limit detection and failover.
         """
-        hdrs = self._build_headers(body)
+        if not upstream_key:
+            upstream_key = get_next_upstream_key()
+        hdrs = self._build_headers(body, upstream_key=upstream_key)
         url = f"{UPSTREAM}{target_path or self.path}"
         req = urllib.request.Request(
             url, data=body, headers=hdrs, method=self.command
@@ -1704,13 +1739,13 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             resp = urllib.request.urlopen(req, context=CTX, timeout=UPSTREAM_TIMEOUT)
 
             if is_stream:
-                self._handle_stream_response(resp, body, model, is_retry, debug, target_path)
+                self._handle_stream_response(resp, body, model, is_retry, debug, target_path, upstream_key=upstream_key)
             else:
-                self._handle_nonstream_response(resp, body, model, is_retry, debug, target_path)
+                self._handle_nonstream_response(resp, body, model, is_retry, debug, target_path, upstream_key=upstream_key)
 
         except urllib.error.HTTPError as e:
             err_body = e.read()
-            self._handle_http_error(e, err_body, body, model, is_retry, debug, target_path)
+            self._handle_http_error(e, err_body, body, model, is_retry, debug, target_path, upstream_key=upstream_key)
 
         except Exception as e:
             sys.stderr.write(f"[ar] EXCEPTION: {e}\n")
@@ -1736,7 +1771,7 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
 
     # ------ Streaming response handler (with buffered early detection) ------
 
-    def _handle_stream_response(self, resp, body, model, is_retry, debug, target_path):
+    def _handle_stream_response(self, resp, body, model, is_retry, debug, target_path, upstream_key=None):
         """Handle a streaming response.
 
         Buffers the first SSE event to detect content-blocked before
@@ -1766,24 +1801,41 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                 is_retry=True,
                 debug=debug,
                 target_path=target_path,
+                upstream_key=upstream_key,
             )
             return
 
         # Check if first event is rate-limited or transient upstream server error (e.g. Azure TPM in eastus2)
         if first_event is not None and is_rate_limit_or_server_error(first_event) and body and not is_retry:
-            sys.stderr.write(
-                "[ar] [WARN] rate-limit or transient upstream error in first SSE event, "
-                "backing off 2.5s and retrying...\n"
-            )
-            import time
-            time.sleep(2.5)
-            self._attempt_request(
-                body,
-                is_retry=True,
-                debug=debug,
-                target_path=target_path,
-            )
-            return
+            alt_key = get_alternate_upstream_key(upstream_key) if upstream_key else None
+            if alt_key and alt_key != upstream_key:
+                sys.stderr.write(
+                    f"[ar] [FAILOVER] rate-limit in first SSE event on key ...{upstream_key[-6:]}, "
+                    f"switching to alternate key ...{alt_key[-6:]} and retrying immediately...\n"
+                )
+                self._attempt_request(
+                    body,
+                    is_retry=True,
+                    debug=debug,
+                    target_path=target_path,
+                    upstream_key=alt_key,
+                )
+                return
+            else:
+                sys.stderr.write(
+                    "[ar] [WARN] rate-limit or transient upstream error in first SSE event, "
+                    "backing off 2.5s and retrying...\n"
+                )
+                import time
+                time.sleep(2.5)
+                self._attempt_request(
+                    body,
+                    is_retry=True,
+                    debug=debug,
+                    target_path=target_path,
+                    upstream_key=upstream_key,
+                )
+                return
 
         # Now send response headers (we know the first event is OK)
         self.send_response(resp.status)
@@ -1890,9 +1942,26 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
 
     # ------ Non-streaming response handler ------
 
-    def _handle_nonstream_response(self, resp, body, model, is_retry, debug, target_path):
+    def _handle_nonstream_response(self, resp, body, model, is_retry, debug, target_path, upstream_key=None):
         """Handle a non-streaming (buffered) response."""
         buf = resp.read()
+
+        # Check rate-limit or server error in 200 response body
+        if not is_retry and is_rate_limit_or_server_error(buf) and body:
+            alt_key = get_alternate_upstream_key(upstream_key) if upstream_key else None
+            if alt_key and alt_key != upstream_key:
+                sys.stderr.write(
+                    f"[ar] [FAILOVER] rate-limit in response body on key ...{upstream_key[-6:]}, "
+                    f"switching to alternate key ...{alt_key[-6:]} and retrying immediately...\n"
+                )
+                self._attempt_request(
+                    body,
+                    is_retry=True,
+                    debug=debug,
+                    target_path=target_path,
+                    upstream_key=alt_key,
+                )
+                return
 
         # Content-blocked in a 200 response
         if not is_retry and is_content_blocked(buf) and body:
@@ -1919,6 +1988,7 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                     is_retry=True,
                     debug=debug,
                     target_path=target_path,
+                    upstream_key=upstream_key,
                 )
                 return
 
@@ -1978,7 +2048,7 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
 
     # ------ HTTP error handler ------
 
-    def _handle_http_error(self, e, err_body, body, model, is_retry, debug, target_path):
+    def _handle_http_error(self, e, err_body, body, model, is_retry, debug, target_path, upstream_key=None):
         """Handle HTTP errors, with retry logic for content-blocked and transient upstream glitches."""
         # Fallback for models endpoint on error
         if (target_path or self.path) in ("/v1/models", "/models"):
@@ -1988,19 +2058,35 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
 
         # Transient upstream failure retry (429 rate limit, 502 bad gateway, 503 no channel, 504 timeout)
         if not is_retry and (e.code in (429, 502, 503, 504) or is_rate_limit_or_server_error(err_body)) and body:
-            sys.stderr.write(
-                f"[ar] [WARN] transient upstream error HTTP {e.code}, "
-                f"retrying once after 2.5s backoff...\n"
-            )
-            import time
-            time.sleep(2.5)
-            self._attempt_request(
-                body,
-                is_retry=True,
-                debug=debug,
-                target_path=target_path,
-            )
-            return
+            alt_key = get_alternate_upstream_key(upstream_key) if upstream_key else None
+            if alt_key and alt_key != upstream_key:
+                sys.stderr.write(
+                    f"[ar] [FAILOVER] HTTP {e.code} on key ...{upstream_key[-6:]}, "
+                    f"switching to alternate key ...{alt_key[-6:]} and retrying immediately...\n"
+                )
+                self._attempt_request(
+                    body,
+                    is_retry=True,
+                    debug=debug,
+                    target_path=target_path,
+                    upstream_key=alt_key,
+                )
+                return
+            else:
+                sys.stderr.write(
+                    f"[ar] [WARN] transient upstream error HTTP {e.code}, "
+                    f"retrying once after 2.5s backoff...\n"
+                )
+                import time
+                time.sleep(2.5)
+                self._attempt_request(
+                    body,
+                    is_retry=True,
+                    debug=debug,
+                    target_path=target_path,
+                    upstream_key=upstream_key,
+                )
+                return
 
         # Content-blocked retry (HTTP error)
         if not is_retry and is_content_blocked(err_body) and body:
@@ -2091,7 +2177,7 @@ class ThreadedHTTPServer(http.server.HTTPServer):
 # ===================================================================
 
 if __name__ == "__main__":
-    if not API_KEY:
+    if not UPSTREAM_API_KEYS and not API_KEY:
         print(
             "ERROR: PROXY_UPSTREAM_API_KEY (or AGENTROUTER_API_KEY) is required.\n"
             "  Create a .env file next to this script with:\n"
@@ -2121,6 +2207,7 @@ if __name__ == "__main__":
         else:
             raise
     print(f"* provider proxy ::{LISTEN_HOST}:{PORT} -> {UPSTREAM}")
+    print(f"  Upstream keys:           {len(UPSTREAM_API_KEYS)} keys loaded (round-robin + failover)")
     print(f"  Content-block retry:      ENABLED")
     print(f"  System prompt injection:  {'ENABLED' if INJECT_PREAMBLE else 'DISABLED'}")
     print(f"  Payload format:           {fmt_str} (OpenAI + Anthropic)")
