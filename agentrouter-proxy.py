@@ -1352,6 +1352,33 @@ def is_content_blocked(data: bytes) -> bool:
     return False
 
 
+def is_rate_limit_or_server_error(data: bytes) -> bool:
+    """Check if an SSE event or HTTP body indicates a rate-limit or transient upstream failure."""
+    if not data:
+        return False
+    lower = data.lower()
+    rate_keys = (
+        b"rate limit",
+        b"rate_limit",
+        b"exceeded token rate limit",
+        b"token rate limit",
+        b"too many requests",
+        b"tpm",
+        b"rpm",
+    )
+    if any(k in lower for k in rate_keys):
+        return True
+    server_keys = (
+        b"upstream service unavailable",
+        b"server_error",
+        b"temporarily unavailable",
+        b"capacity",
+    )
+    if any(k in lower for k in server_keys):
+        return True
+    return False
+
+
 def clean_sse_line(line: bytes):
     """Filter problematic SSE lines from the stream.
 
@@ -1742,6 +1769,22 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             )
             return
 
+        # Check if first event is rate-limited or transient upstream server error (e.g. Azure TPM in eastus2)
+        if first_event is not None and is_rate_limit_or_server_error(first_event) and body and not is_retry:
+            sys.stderr.write(
+                "[ar] [WARN] rate-limit or transient upstream error in first SSE event, "
+                "backing off 2.5s and retrying...\n"
+            )
+            import time
+            time.sleep(2.5)
+            self._attempt_request(
+                body,
+                is_retry=True,
+                debug=debug,
+                target_path=target_path,
+            )
+            return
+
         # Now send response headers (we know the first event is OK)
         self.send_response(resp.status)
         self.send_header("Access-Control-Allow-Origin", "*")
@@ -1944,13 +1987,13 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             return
 
         # Transient upstream failure retry (429 rate limit, 502 bad gateway, 503 no channel, 504 timeout)
-        if not is_retry and e.code in (429, 502, 503, 504) and body:
+        if not is_retry and (e.code in (429, 502, 503, 504) or is_rate_limit_or_server_error(err_body)) and body:
             sys.stderr.write(
                 f"[ar] [WARN] transient upstream error HTTP {e.code}, "
-                f"retrying once after 1s...\n"
+                f"retrying once after 2.5s backoff...\n"
             )
             import time
-            time.sleep(1.0)
+            time.sleep(2.5)
             self._attempt_request(
                 body,
                 is_retry=True,
