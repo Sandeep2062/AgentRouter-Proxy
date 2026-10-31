@@ -2069,7 +2069,14 @@ if __name__ == "__main__":
         sys.exit(1)
 
     fmt_str = FORMAT_MODE if FORMAT_MODE in ("openai", "anthropic") else "auto-detect"
-    server = ThreadedHTTPServer((LISTEN_HOST, PORT), ProxyHandler)
+    try:
+        server = ThreadedHTTPServer((LISTEN_HOST, PORT), ProxyHandler)
+    except OSError as e:
+        if LISTEN_HOST not in ("0.0.0.0", "::"):
+            sys.stderr.write(f"[ar] binding to {LISTEN_HOST}:{PORT} failed ({e}), falling back to 0.0.0.0:{PORT}\n")
+            server = ThreadedHTTPServer(("0.0.0.0", PORT), ProxyHandler)
+        else:
+            raise
     print(f"* provider proxy ::{LISTEN_HOST}:{PORT} -> {UPSTREAM}")
     print(f"  Content-block retry:      ENABLED")
     print(f"  System prompt injection:  {'ENABLED' if INJECT_PREAMBLE else 'DISABLED'}")
