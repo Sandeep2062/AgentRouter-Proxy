@@ -718,6 +718,7 @@ def chat_messages_to_responses_input(messages: list) -> list:
 
 def responses_to_chat_completion(res_json: dict, model: str) -> dict:
     output_text = ""
+    reasoning_text = ""
     tool_calls = []
     for item in res_json.get("output", []):
         itype = item.get("type")
@@ -725,6 +726,16 @@ def responses_to_chat_completion(res_json: dict, model: str) -> dict:
             for c in item.get("content", []):
                 if c.get("text"):
                     output_text += c.get("text")
+        elif itype in ("reasoning", "thought"):
+            content = item.get("content", [])
+            if isinstance(content, list):
+                for c in content:
+                    if isinstance(c, dict) and c.get("text"):
+                        reasoning_text += c.get("text")
+            elif isinstance(content, str):
+                reasoning_text += content
+            if item.get("text"):
+                reasoning_text += item.get("text")
         elif itype == "function_call":
             tool_calls.append({
                 "id": item.get("call_id") or item.get("id", "call_default"),
@@ -743,6 +754,8 @@ def responses_to_chat_completion(res_json: dict, model: str) -> dict:
         "role": "assistant",
         "content": output_text or None,
     }
+    if reasoning_text:
+        msg["reasoning_content"] = reasoning_text
     if tool_calls:
         msg["tool_calls"] = tool_calls
 
@@ -772,6 +785,8 @@ class ResponsesStreamTranslator:
     Maintains tool call index mapping across streaming chunks so parallel tool calls
     each receive their own distinct index (0, 1, 2...) instead of concatenating into index 0.
     Also tracks token usage and emits usage chunks for OpenCode / AI SDK streamUsage compatibility.
+    Handles reasoning events and thinking tags, routing them to delta.reasoning_content
+    for Kilo Code reasoning blocks.
     """
 
     def __init__(self, resp_id: str = "chatcmpl-stream", model: str = ""):
@@ -781,6 +796,20 @@ class ResponsesStreamTranslator:
         self.output_index_map = {}  # output_index -> 0, 1, ...
         self.has_emitted_content = False
         self.has_emitted_tool_call = False
+        self.in_think_block = False
+
+    def _make_chunk(self, content=None, reasoning_content=None):
+        delta = {}
+        if content is not None:
+            delta["content"] = content
+        if reasoning_content is not None:
+            delta["reasoning_content"] = reasoning_content
+        chunk = {
+            "id": self.resp_id,
+            "object": "chat.completion.chunk",
+            "choices": [{"index": 0, "delta": delta}],
+        }
+        return b"data: " + json.dumps(chunk, separators=(",", ":")).encode() + b"\n\n"
 
     def translate_line(self, line: bytes) -> list[bytes]:
         if not line.startswith(b"data: "):
@@ -796,17 +825,63 @@ class ResponsesStreamTranslator:
         event_type = data.get("type")
         if event_type == "response.output_text.delta":
             delta = data.get("delta", "")
-            if delta:
-                self.has_emitted_content = True
-            chunk = {
-                "id": self.resp_id,
-                "object": "chat.completion.chunk",
-                "choices": [{"index": 0, "delta": {"content": delta}}],
-            }
-            return [b"data: " + json.dumps(chunk, separators=(",", ":")).encode() + b"\n\n"]
+            if not delta:
+                return []
+            self.has_emitted_content = True
+
+            # Separate thinking tags (<think>...</think>) into reasoning_content for Kilo Code
+            chunks = []
+            text = delta
+            while text:
+                if not self.in_think_block:
+                    if "<think>" in text:
+                        before, _, after = text.partition("<think>")
+                        if before:
+                            chunks.append(self._make_chunk(content=before))
+                        self.in_think_block = True
+                        text = after
+                    else:
+                        chunks.append(self._make_chunk(content=text))
+                        break
+                else:
+                    if "</think>" in text:
+                        thought, _, after = text.partition("</think>")
+                        if thought:
+                            chunks.append(self._make_chunk(reasoning_content=thought))
+                        self.in_think_block = False
+                        text = after
+                    else:
+                        chunks.append(self._make_chunk(reasoning_content=text))
+                        break
+            return chunks
+
+        elif event_type in (
+            "response.reasoning_text.delta",
+            "response.thought.delta",
+            "response.reasoning.delta",
+        ):
+            delta = data.get("delta", "")
+            if not delta:
+                return []
+            self.has_emitted_content = True
+            return [self._make_chunk(reasoning_content=delta)]
 
         elif event_type == "response.output_item.added":
             item = data.get("item", {})
+            if item.get("type") in ("reasoning", "thought"):
+                content = item.get("content", [])
+                text = ""
+                if isinstance(content, list):
+                    for c in content:
+                        if isinstance(c, dict) and c.get("text"):
+                            text += c.get("text")
+                elif isinstance(content, str):
+                    text = content
+                if text:
+                    self.has_emitted_content = True
+                    return [self._make_chunk(reasoning_content=text)]
+                return []
+
             if item.get("type") == "function_call":
                 self.has_emitted_tool_call = True
                 item_id = item.get("id") or item.get("call_id", "")

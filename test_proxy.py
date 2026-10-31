@@ -384,5 +384,45 @@ class ProxyBehaviorTests(unittest.TestCase):
             proxy_server.server_close()
 
 
+    def test_reasoning_and_thinking_translation(self):
+        # 1. Test response.reasoning_text.delta translates to delta.reasoning_content
+        translator = proxy.ResponsesStreamTranslator("chatcmpl-think-test", model="gpt-6.1-sol")
+        reasoning_evt = b"data: " + json.dumps({
+            "type": "response.reasoning_text.delta",
+            "delta": "Thinking through the logic...",
+        }).encode() + b"\n\n"
+        chunks = translator.translate_line(reasoning_evt.strip())
+        self.assertEqual(len(chunks), 1)
+        c0 = json.loads(chunks[0][6:].strip())
+        self.assertEqual(c0["choices"][0]["delta"]["reasoning_content"], "Thinking through the logic...")
+
+        # 2. Test <think>...</think> in response.output_text.delta translates to delta.reasoning_content
+        translator2 = proxy.ResponsesStreamTranslator("chatcmpl-think-tag", model="gpt-6.1-sol")
+        text_evt = b"data: " + json.dumps({
+            "type": "response.output_text.delta",
+            "delta": "<think>Step 1 analysis</think>Final answer",
+        }).encode() + b"\n\n"
+        chunks2 = translator2.translate_line(text_evt.strip())
+        self.assertEqual(len(chunks2), 2)
+        c2_0 = json.loads(chunks2[0][6:].strip())
+        c2_1 = json.loads(chunks2[1][6:].strip())
+        self.assertEqual(c2_0["choices"][0]["delta"]["reasoning_content"], "Step 1 analysis")
+        self.assertEqual(c2_1["choices"][0]["delta"]["content"], "Final answer")
+
+        # 3. Test non-streaming responses_to_chat_completion extracts reasoning_content
+        raw_resp = {
+            "id": "resp_test",
+            "model": "gpt-6.1-sol",
+            "output": [
+                {"type": "reasoning", "content": [{"text": "Deep thinking trace"}]},
+                {"type": "message", "content": [{"text": "Hello user"}]}
+            ],
+            "usage": {"input_tokens": 10, "output_tokens": 20, "total_tokens": 30}
+        }
+        res = proxy.responses_to_chat_completion(raw_resp, "gpt-6.1-sol")
+        self.assertEqual(res["choices"][0]["message"]["content"], "Hello user")
+        self.assertEqual(res["choices"][0]["message"]["reasoning_content"], "Deep thinking trace")
+
+
 if __name__ == "__main__":
     unittest.main()
