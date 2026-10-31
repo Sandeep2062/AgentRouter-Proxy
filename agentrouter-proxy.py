@@ -1836,8 +1836,8 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         if first_event is not None and is_rate_limit_or_server_error(first_event) and body and not is_retry:
             alt_key = get_alternate_upstream_key(upstream_key) if upstream_key else None
             if is_tpm_rate_limit(first_event):
-                sys.stderr.write("[ar] [BACKOFF] Azure TPM rate limit detected in first SSE event, sleeping 5s to replenish tokens...\n")
-                time.sleep(5.0)
+                sys.stderr.write("[ar] [BACKOFF] Azure TPM rate limit detected in first SSE event, sleeping 2s to replenish tokens...\n")
+                time.sleep(2.0)
             if alt_key and alt_key != upstream_key:
                 sys.stderr.write(
                     f"[ar] [FAILOVER] rate-limit in first SSE event on key ...{upstream_key[-6:]}, "
@@ -1980,8 +1980,8 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             sys.stderr.write(f"[ar] Rate limit response: {buf.decode(errors='replace')[:300]}\n")
             alt_key = get_alternate_upstream_key(upstream_key) if upstream_key else None
             if is_tpm_rate_limit(buf):
-                sys.stderr.write("[ar] [BACKOFF] Azure TPM rate limit detected in response body, sleeping 5s to replenish tokens...\n")
-                time.sleep(5.0)
+                sys.stderr.write("[ar] [BACKOFF] Azure TPM rate limit detected in response body, sleeping 2s to replenish tokens...\n")
+                time.sleep(2.0)
             if alt_key and alt_key != upstream_key:
                 sys.stderr.write(
                     f"[ar] [FAILOVER] rate-limit in response body on key ...{upstream_key[-6:]}, "
@@ -2107,8 +2107,8 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         if not is_retry and (e.code in (429, 502, 503, 504) or is_rate_limit_or_server_error(err_body)) and body:
             alt_key = get_alternate_upstream_key(upstream_key) if upstream_key else None
             if e.code == 429 or is_tpm_rate_limit(err_body):
-                sys.stderr.write("[ar] [BACKOFF] HTTP 429 / Azure TPM rate limit, sleeping 5s to replenish tokens...\n")
-                time.sleep(5.0)
+                sys.stderr.write("[ar] [BACKOFF] HTTP 429 / Azure TPM rate limit, sleeping 2s to replenish tokens...\n")
+                time.sleep(2.0)
             if alt_key and alt_key != upstream_key:
                 sys.stderr.write(
                     f"[ar] [FAILOVER] HTTP {e.code} on key ...{upstream_key[-6:]}, "
