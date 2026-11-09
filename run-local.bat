@@ -63,20 +63,20 @@ echo    Base URL:      http://127.0.0.1:4182/v1
 echo    API Key:       sk-local  (or any text - local loopback requires no auth)
 echo    Format:        Dual format (OpenAI / Anthropic auto-detected)
 echo  -----------------------------------------------------------------------------
-echo   HEALTH & MONITORING:
+echo   HEALTH ^& MONITORING:
 echo  -----------------------------------------------------------------------------
 echo    Health Endpoint: http://127.0.0.1:4182/healthz
 echo    Models List:     http://127.0.0.1:4182/v1/models
 echo    Live Usage JSON: http://127.0.0.1:4182/_usage
 echo.
 echo    [TIP] To see a live real-time token/speed dashboard:
-echo          Double-click 'view-usage.bat' in another window!
+echo          Double-click 'watch-usage.bat' in another window!
 echo.
 echo  -----------------------------------------------------------------------------
 echo   Press Ctrl+C in this window or close it anytime to STOP the proxy.
 echo ===============================================================================
 echo.
-echo [LIVE ACTIVITY & PROGRESS LOG]
+echo [LIVE ACTIVITY ^& PROGRESS LOG]
 echo.
 
 python "%~dp0agentrouter-proxy.py" !PORT!
