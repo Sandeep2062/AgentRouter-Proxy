@@ -231,6 +231,212 @@ MODEL_ALIASES = {
     "claude-opus-5": "claude-opus-5",
 }
 
+DASHBOARD_HTML = """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AgentRouter Proxy — Live Token Dashboard</title>
+<style>
+  :root {
+    --bg: #0d1117;
+    --card: #161b22;
+    --card-border: #30363d;
+    --text: #c9d1d9;
+    --text-bright: #f0f6fc;
+    --text-muted: #8b949e;
+    --accent: #58a6ff;
+    --green: #3fb950;
+    --yellow: #d29922;
+    --purple: #bc8cff;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    padding: 24px;
+    line-height: 1.5;
+  }
+  .container { max-width: 1040px; margin: 0 auto; }
+  header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 24px;
+    padding-bottom: 16px;
+    border-bottom: 1px solid var(--card-border);
+  }
+  .title-group h1 { font-size: 22px; color: var(--text-bright); display: flex; align-items: center; gap: 10px; }
+  .badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    background: rgba(63, 185, 80, 0.15);
+    color: var(--green);
+    font-size: 12px;
+    font-weight: 600;
+    padding: 4px 10px;
+    border-radius: 12px;
+    border: 1px solid rgba(63, 185, 80, 0.3);
+  }
+  .pulse { width: 8px; height: 8px; border-radius: 50%; background: var(--green); box-shadow: 0 0 8px var(--green); }
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+    gap: 16px;
+    margin-bottom: 24px;
+  }
+  .card {
+    background: var(--card);
+    border: 1px solid var(--card-border);
+    border-radius: 10px;
+    padding: 20px;
+  }
+  .card-label { font-size: 13px; color: var(--text-muted); text-transform: uppercase; font-weight: 600; letter-spacing: 0.5px; }
+  .card-val { font-size: 28px; font-weight: 700; color: var(--text-bright); margin: 6px 0; }
+  .card-sub { font-size: 12px; color: var(--text-muted); }
+  .table-card { background: var(--card); border: 1px solid var(--card-border); border-radius: 10px; padding: 20px; margin-bottom: 24px; }
+  .table-title { font-size: 16px; font-weight: 600; color: var(--text-bright); margin-bottom: 16px; }
+  table { width: 100%; border-collapse: collapse; }
+  th { text-align: left; font-size: 12px; color: var(--text-muted); padding: 8px 12px; border-bottom: 1px solid var(--card-border); }
+  td { padding: 12px; font-size: 14px; border-bottom: 1px solid rgba(48, 54, 61, 0.5); }
+  .bar-container { background: rgba(255, 255, 255, 0.08); border-radius: 4px; height: 6px; width: 100%; overflow: hidden; margin-top: 4px; }
+  .bar { height: 100%; background: var(--accent); border-radius: 4px; }
+  .config-box { background: #0b0f14; border: 1px dashed var(--card-border); border-radius: 8px; padding: 16px; font-family: monospace; font-size: 13px; color: #a5d6ff; line-height: 1.8; }
+</style>
+</head>
+<body>
+<div class="container">
+  <header>
+    <div class="title-group">
+      <h1>AgentRouter Proxy <span class="badge"><span class="pulse"></span> ONLINE</span></h1>
+    </div>
+    <div style="font-size: 13px; color: var(--text-muted);">
+      Target: <span id="target-addr" style="color: var(--accent); font-family: monospace;">127.0.0.1:4182</span>
+    </div>
+  </header>
+
+  <div class="grid">
+    <div class="card">
+      <div class="card-label">Tokens Today</div>
+      <div class="card-val" id="val-today-tokens">0</div>
+      <div class="card-sub" id="val-today-breakdown">Prompt: 0 | Completion: 0</div>
+    </div>
+    <div class="card">
+      <div class="card-label">Live Generation Speed</div>
+      <div class="card-val" style="color: var(--green);" id="val-speed">0.0 <span style="font-size: 16px;">tok/s</span></div>
+      <div class="card-sub" id="val-status-label">Idle</div>
+    </div>
+    <div class="card">
+      <div class="card-label">Requests Today</div>
+      <div class="card-val" id="val-today-reqs">0</div>
+      <div class="card-sub" id="val-total-reqs">All-time: 0 reqs</div>
+    </div>
+    <div class="card">
+      <div class="card-label">This Month / All-Time</div>
+      <div class="card-val" id="val-month-tokens">0</div>
+      <div class="card-sub" id="val-alltime-tokens">All-time: 0 tokens</div>
+    </div>
+  </div>
+
+  <div class="table-card">
+    <div class="table-title">Per-Model Usage Breakdown (Today)</div>
+    <table>
+      <thead>
+        <tr>
+          <th>MODEL</th>
+          <th>REQUESTS</th>
+          <th>TOTAL TOKENS</th>
+          <th>SHARE</th>
+        </tr>
+      </thead>
+      <tbody id="models-tbody">
+        <tr><td colspan="4" style="text-align: center; color: var(--text-muted);">No requests recorded today yet</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="table-card">
+    <div class="table-title">AI Tool Configuration (OpenCode, Cursor, Claude Code, Cline)</div>
+    <div class="config-box">
+      <div><strong>Base URL:</strong> http://127.0.0.1:4182/v1</div>
+      <div><strong>API Key:</strong> sk-local</div>
+      <div><strong>Format:</strong> OpenAI / Anthropic dual-compatible (auto-detected)</div>
+    </div>
+  </div>
+</div>
+
+<script>
+let prevTokens = 0;
+let prevTime = Date.now();
+
+async function refresh() {
+  try {
+    const res = await fetch('/_usage');
+    if (!res.ok) return;
+    const data = await res.json();
+
+    const today = data.today || {};
+    const totalToday = (today.total_tokens || 0);
+    const compToday = (today.completion_tokens || 0);
+    const promptToday = (today.prompt_tokens || 0);
+    const reqsToday = (today.requests || 0);
+
+    document.getElementById('val-today-tokens').innerText = Number(totalToday).toLocaleString();
+    document.getElementById('val-today-breakdown').innerText = `Prompt: ${Number(promptToday).toLocaleString()} | Completion: ${Number(compToday).toLocaleString()}`;
+    document.getElementById('val-today-reqs').innerText = Number(reqsToday).toLocaleString();
+    document.getElementById('val-month-tokens').innerText = Number(data.this_month?.total_tokens || 0).toLocaleString();
+    document.getElementById('val-alltime-tokens').innerText = `All-time: ${Number(data.all_time?.total_tokens || 0).toLocaleString()} tokens`;
+    document.getElementById('val-total-reqs').innerText = `All-time: ${Number(data.all_time?.requests || 0).toLocaleString()} reqs`;
+
+    const now = Date.now();
+    const elapsed = (now - prevTime) / 1000;
+    if (prevTokens > 0 && compToday >= prevTokens && elapsed > 0.3) {
+      const speed = (compToday - prevTokens) / elapsed;
+      document.getElementById('val-speed').innerHTML = `${speed.toFixed(1)} <span style="font-size: 16px;">tok/s</span>`;
+      document.getElementById('val-status-label').innerText = speed > 0.5 ? '⚡ Streaming response...' : 'Idle';
+    } else if (compToday === prevTokens && elapsed > 2.0) {
+      document.getElementById('val-speed').innerHTML = `0.0 <span style="font-size: 16px;">tok/s</span>`;
+      document.getElementById('val-status-label').innerText = 'Idle';
+    }
+    prevTokens = compToday;
+    prevTime = now;
+
+    const models = today.models || {};
+    const mKeys = Object.keys(models);
+    const tbody = document.getElementById('models-tbody');
+    if (mKeys.length > 0) {
+      tbody.innerHTML = '';
+      mKeys.forEach(m => {
+        const mData = models[m];
+        const pct = totalToday > 0 ? ((mData.total_tokens / totalToday) * 100).toFixed(1) : 0;
+        const tr = document.createElement('tr');
+        tr.innerHTML = `
+          <td><strong>${m}</strong></td>
+          <td>${Number(mData.requests || 0).toLocaleString()}</td>
+          <td>${Number(mData.total_tokens || 0).toLocaleString()}</td>
+          <td style="min-width: 140px;">
+            <div style="display: flex; justify-content: space-between; font-size: 12px; margin-bottom: 2px;">
+              <span>${pct}%</span>
+            </div>
+            <div class="bar-container"><div class="bar" style="width: ${pct}%;"></div></div>
+          </td>
+        `;
+        tbody.appendChild(tr);
+      });
+    }
+  } catch (e) {}
+}
+
+setInterval(refresh, 1500);
+refresh();
+</script>
+</body>
+</html>
+"""
+
+
 # ---------------------------------------------------------------------------
 # Content-Block Mitigation — Educational Preamble
 # ---------------------------------------------------------------------------
@@ -1566,6 +1772,12 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             self.wfile.write(body)
             self.wfile.flush()
             return
+        if self.path in ("/", "/dashboard", "/_dashboard"):
+            if not self._authorized():
+                return
+            self._serve_dashboard()
+            return
+
         if self.path == "/_usage":
             if not self._authorized():
                 return
@@ -1624,6 +1836,17 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
         self.wfile.write(data)
+
+    def _serve_dashboard(self):
+        """``GET /`` or ``GET /dashboard`` — return dark-mode live HTML dashboard."""
+        data = DASHBOARD_HTML.encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+        self.wfile.flush()
 
     def _serve_fallback_models(self):
         """Return healthy fallback model list for Kilo Code / OpenCode."""
