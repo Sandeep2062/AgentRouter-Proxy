@@ -348,11 +348,12 @@ DASHBOARD_HTML = """<!DOCTYPE html>
           <th>MODEL</th>
           <th>REQUESTS</th>
           <th>TOTAL TOKENS</th>
+          <th>AVG SPEED</th>
           <th>SHARE</th>
         </tr>
       </thead>
       <tbody id="models-tbody">
-        <tr><td colspan="4" style="text-align: center; color: var(--text-muted);">No requests recorded today yet</td></tr>
+        <tr><td colspan="5" style="text-align: center; color: var(--text-muted);">No requests recorded today yet</td></tr>
       </tbody>
     </table>
   </div>
@@ -390,13 +391,20 @@ async function refresh() {
     document.getElementById('val-alltime-tokens').innerText = `All-time: ${Number(data.all_time?.total_tokens || 0).toLocaleString()} tokens`;
     document.getElementById('val-total-reqs').innerText = `All-time: ${Number(data.all_time?.requests || 0).toLocaleString()} reqs`;
 
+    const lastSpeed = Number(data.last_speed_tps || 0);
+    const lastDur = Number(data.last_duration_sec || 0);
+    const lastModel = data.last_model || '';
+
     const now = Date.now();
     const elapsed = (now - prevTime) / 1000;
-    if (prevTokens > 0 && compToday >= prevTokens && elapsed > 0.3) {
-      const speed = (compToday - prevTokens) / elapsed;
-      document.getElementById('val-speed').innerHTML = `${speed.toFixed(1)} <span style="font-size: 16px;">tok/s</span>`;
-      document.getElementById('val-status-label').innerText = speed > 0.5 ? '⚡ Streaming response...' : 'Idle';
-    } else if (compToday === prevTokens && elapsed > 2.0) {
+    if (prevTokens > 0 && compToday > prevTokens && elapsed > 0.3) {
+      const liveSpeed = (compToday - prevTokens) / elapsed;
+      document.getElementById('val-speed').innerHTML = `${liveSpeed.toFixed(1)} <span style="font-size: 16px;">tok/s</span>`;
+      document.getElementById('val-status-label').innerText = '⚡ Streaming response...';
+    } else if (lastSpeed > 0) {
+      document.getElementById('val-speed').innerHTML = `${lastSpeed.toFixed(1)} <span style="font-size: 16px;">tok/s</span>`;
+      document.getElementById('val-status-label').innerText = `⚡ ${lastModel} (${lastDur.toFixed(1)}s)`;
+    } else {
       document.getElementById('val-speed').innerHTML = `0.0 <span style="font-size: 16px;">tok/s</span>`;
       document.getElementById('val-status-label').innerText = 'Idle';
     }
@@ -411,11 +419,13 @@ async function refresh() {
       mKeys.forEach(m => {
         const mData = models[m];
         const pct = totalToday > 0 ? ((mData.total_tokens / totalToday) * 100).toFixed(1) : 0;
+        const speedVal = mData.avg_speed_tps ? `${Number(mData.avg_speed_tps).toFixed(1)} tok/s` : '—';
         const tr = document.createElement('tr');
         tr.innerHTML = `
           <td><strong>${m}</strong></td>
           <td>${Number(mData.requests || 0).toLocaleString()}</td>
           <td>${Number(mData.total_tokens || 0).toLocaleString()}</td>
+          <td style="color: var(--green); font-weight: 600;">${speedVal}</td>
           <td style="min-width: 140px;">
             <div style="display: flex; justify-content: space-between; font-size: 12px; margin-bottom: 2px;">
               <span>${pct}%</span>
@@ -524,10 +534,22 @@ def _save_usage(data: dict) -> None:
         pass
 
 
-def record_tokens(model: str, prompt_tokens: int, completion_tokens: int, total_tokens: int) -> None:
+def record_tokens(
+    model: str,
+    prompt_tokens: int,
+    completion_tokens: int,
+    total_tokens: int,
+    duration_sec: float = 0.0,
+    req_duration_sec: float = 0.0,
+) -> None:
     """Record token usage into usage.json keyed by YYYY-MM-DD and YYYY-MM."""
     today = datetime.datetime.now().strftime("%Y-%m-%d")
     month = today[:7]  # YYYY-MM
+    tps = 0.0
+    eff_dur = duration_sec if duration_sec > 0.05 else req_duration_sec
+    if eff_dur > 0.05 and completion_tokens > 0:
+        tps = completion_tokens / eff_dur
+
     with _usage_lock:
         data = _load_usage()
         # Per-day bucket
@@ -536,20 +558,45 @@ def record_tokens(model: str, prompt_tokens: int, completion_tokens: int, total_
         day_bucket["completion_tokens"] = day_bucket.get("completion_tokens", 0) + completion_tokens
         day_bucket["total_tokens"] = day_bucket.get("total_tokens", 0) + total_tokens
         day_bucket["requests"] = day_bucket.get("requests", 0) + 1
+        if eff_dur > 0:
+            day_bucket["total_duration_sec"] = round(day_bucket.get("total_duration_sec", 0.0) + eff_dur, 2)
+            if day_bucket.get("total_duration_sec", 0) > 0:
+                day_bucket["avg_speed_tps"] = round(day_bucket["completion_tokens"] / day_bucket["total_duration_sec"], 1)
+
         # Per-model breakdown inside day
         models_day = day_bucket.setdefault("models", {}).setdefault(model, {})
         models_day["total_tokens"] = models_day.get("total_tokens", 0) + total_tokens
+        models_day["completion_tokens"] = models_day.get("completion_tokens", 0) + completion_tokens
         models_day["requests"] = models_day.get("requests", 0) + 1
+        if eff_dur > 0:
+            models_day["total_duration_sec"] = round(models_day.get("total_duration_sec", 0.0) + eff_dur, 2)
+            if models_day.get("total_duration_sec", 0) > 0:
+                models_day["avg_speed_tps"] = round(models_day["completion_tokens"] / models_day["total_duration_sec"], 1)
+
         # Per-month bucket
         month_bucket = data.setdefault("months", {}).setdefault(month, {})
         month_bucket["prompt_tokens"] = month_bucket.get("prompt_tokens", 0) + prompt_tokens
         month_bucket["completion_tokens"] = month_bucket.get("completion_tokens", 0) + completion_tokens
         month_bucket["total_tokens"] = month_bucket.get("total_tokens", 0) + total_tokens
         month_bucket["requests"] = month_bucket.get("requests", 0) + 1
+
+        # Global latest metrics for dashboards
+        if tps > 0:
+            data["last_speed_tps"] = round(tps, 1)
+            data["last_duration_sec"] = round(eff_dur, 2)
+            data["last_model"] = model
+
         _save_usage(data)
+
     now_str = datetime.datetime.now().strftime("%H:%M:%S")
+    speed_info = ""
+    if tps > 0 and eff_dur > 0:
+        speed_info = f" in {eff_dur:.1f}s ({tps:.1f} tok/s)"
+    elif eff_dur > 0:
+        speed_info = f" in {eff_dur:.1f}s"
+
     sys.stderr.write(
-        f"[ar] [{now_str}] [USAGE] {model}: +{completion_tokens:,} completion (+{prompt_tokens:,} prompt) -> {total_tokens:,} total tokens\n"
+        f"[ar] [{now_str}] [USAGE] {model}: +{completion_tokens:,} completion{speed_info} (+{prompt_tokens:,} prompt) -> {total_tokens:,} total tokens\n"
     )
 
 
@@ -572,6 +619,9 @@ def get_usage_summary() -> dict:
         "this_month": months.get(this_month, {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "requests": 0}),
         "last_month": months.get(last_month, {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "requests": 0}),
         "all_time": {"total_tokens": all_time_tokens, "requests": all_time_requests},
+        "last_speed_tps": data.get("last_speed_tps", 0.0),
+        "last_duration_sec": data.get("last_duration_sec", 0.0),
+        "last_model": data.get("last_model", ""),
     }
 
 # ---------------------------------------------------------------------------
@@ -1033,9 +1083,11 @@ class ResponsesStreamTranslator:
     for Kilo Code reasoning blocks.
     """
 
-    def __init__(self, resp_id: str = "chatcmpl-stream", model: str = ""):
+    def __init__(self, resp_id: str = "chatcmpl-stream", model: str = "", start_time: float = None):
         self.resp_id = resp_id
         self.model = model
+        self.start_time = start_time or time.perf_counter()
+        self.first_token_time = None
         self.tool_indices = {}  # item_id -> 0, 1, ...
         self.output_index_map = {}  # output_index -> 0, 1, ...
         self.has_emitted_content = False
@@ -1067,6 +1119,15 @@ class ResponsesStreamTranslator:
             return []
 
         event_type = data.get("type")
+        if self.first_token_time is None and event_type in (
+            "response.output_text.delta",
+            "response.reasoning.delta",
+            "response.reasoning_summary_text.delta",
+            "response.function_call_arguments.delta",
+            "response.output_item.added",
+        ):
+            self.first_token_time = time.perf_counter()
+
         if event_type == "response.output_text.delta":
             delta = data.get("delta", "")
             if not delta:
@@ -1211,7 +1272,10 @@ class ResponsesStreamTranslator:
 
                 if self.model and (p_tokens or c_tokens or t_tokens):
                     try:
-                        record_tokens(self.model, p_tokens, c_tokens, t_tokens)
+                        end_t = time.perf_counter()
+                        dur = end_t - (self.first_token_time or self.start_time)
+                        req_dur = end_t - self.start_time
+                        record_tokens(self.model, p_tokens, c_tokens, t_tokens, duration_sec=dur, req_duration_sec=req_dur)
                     except Exception:
                         pass
 
@@ -1245,7 +1309,10 @@ class ResponsesStreamTranslator:
                 t_tokens = int(usage_data.get("total_tokens") or (p_tokens + c_tokens))
                 if self.model and (p_tokens or c_tokens or t_tokens):
                     try:
-                        record_tokens(self.model, p_tokens, c_tokens, t_tokens)
+                        end_t = time.perf_counter()
+                        dur = end_t - (self.first_token_time or self.start_time)
+                        req_dur = end_t - self.start_time
+                        record_tokens(self.model, p_tokens, c_tokens, t_tokens, duration_sec=dur, req_duration_sec=req_dur)
                     except Exception:
                         pass
                 usage_chunk = {
@@ -1886,6 +1953,8 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
     # ------ Main proxy logic ------
 
     def _proxy(self):
+        if not hasattr(self, "req_start_time"):
+            self.req_start_time = time.perf_counter()
         if not self._authorized():
             return
         content_len = int(self.headers.get("Content-Length", 0))
@@ -2126,7 +2195,7 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
 
         if is_converted_chat:
             resp_id = f"chatcmpl-{model}"
-            translator = ResponsesStreamTranslator(resp_id, model=model)
+            translator = ResponsesStreamTranslator(resp_id, model=model, start_time=getattr(self, "req_start_time", None))
             if first_event is not None:
                 for line in first_event.splitlines():
                     for tl in translator.translate_line(line):
@@ -2145,8 +2214,10 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                             return
             return
 
+        stream_first_token_time = None
         # Forward the first event (already read)
         if first_event is not None:
+            stream_first_token_time = time.perf_counter()
             cleaned = clean_sse_line(first_event)
             if cleaned is not None:
                 try:
@@ -2157,6 +2228,8 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
 
         # Forward remaining events
         for event in reader.read_events():
+            if stream_first_token_time is None:
+                stream_first_token_time = time.perf_counter()
             if debug:
                 sys.stderr.write(
                     f"[ar-dbg] evt ({len(event)}b): {event[:400]!r}\n"
@@ -2180,11 +2253,17 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                             chunk_obj = json.loads(eline_str[6:])
                             u = chunk_obj.get("usage")
                             if isinstance(u, dict) and (u.get("total_tokens") or u.get("prompt_tokens")):
+                                end_t = time.perf_counter()
+                                req_start = getattr(self, "req_start_time", end_t)
+                                dur = end_t - (stream_first_token_time or req_start)
+                                req_dur = end_t - req_start
                                 record_tokens(
                                     model=model,
                                     prompt_tokens=int(u.get("prompt_tokens", 0)),
                                     completion_tokens=int(u.get("completion_tokens", 0)),
                                     total_tokens=int(u.get("total_tokens", 0)),
+                                    duration_sec=dur,
+                                    req_duration_sec=req_dur,
                                 )
                 except Exception:
                     pass
@@ -2329,11 +2408,16 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             try:
                 resp_obj = json.loads(cleaned)
                 usage_data = resp_obj.get("usage") or {}
+                end_t = time.perf_counter()
+                req_start = getattr(self, "req_start_time", end_t)
+                dur = end_t - req_start
                 record_tokens(
                     model=model,
                     prompt_tokens=int(usage_data.get("prompt_tokens", 0)),
                     completion_tokens=int(usage_data.get("completion_tokens", 0)),
                     total_tokens=int(usage_data.get("total_tokens", 0)),
+                    duration_sec=dur,
+                    req_duration_sec=dur,
                 )
             except Exception:
                 pass

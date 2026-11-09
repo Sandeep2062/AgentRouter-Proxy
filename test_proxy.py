@@ -452,6 +452,23 @@ class ProxyBehaviorTests(unittest.TestCase):
             proxy.UPSTREAM_API_KEYS = orig_keys
             proxy.API_KEY = orig_api_key
 
+    def test_record_tokens_speed_and_summary(self):
+        import io
+        import sys
+        old_stderr = sys.stderr
+        sys.stderr = io.StringIO()
+        try:
+            proxy.record_tokens("test-model", prompt_tokens=1000, completion_tokens=200, total_tokens=1200, duration_sec=2.0)
+            logged = sys.stderr.getvalue()
+            self.assertIn("test-model", logged)
+            self.assertIn("+200 completion in 2.0s (100.0 tok/s)", logged)
+            summary = proxy.get_usage_summary()
+            self.assertEqual(summary["last_speed_tps"], 100.0)
+            self.assertEqual(summary["last_duration_sec"], 2.0)
+            self.assertEqual(summary["last_model"], "test-model")
+        finally:
+            sys.stderr = old_stderr
+
 
 if __name__ == "__main__":
     unittest.main()

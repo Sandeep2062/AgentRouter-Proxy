@@ -65,6 +65,10 @@ function Show-Dashboard {
         Write-Host " Real-Time Speed: " -NoNewline
         if ($liveSpeed -gt 0) {
             Write-Host ("{0:N1} tok/s  [STREAMING]" -f $liveSpeed) -ForegroundColor Green
+        } elseif ($data.last_speed_tps -and [double]$data.last_speed_tps -gt 0) {
+            $lastMod = if ($data.last_model) { $data.last_model } else { "model" }
+            $lastD = if ($data.last_duration_sec) { [double]$data.last_duration_sec } else { 0.0 }
+            Write-Host ("{0:N1} tok/s  [LAST: {1} ({2:N1}s)]" -f [double]$data.last_speed_tps, $lastMod, $lastD) -ForegroundColor Cyan
         } else {
             Write-Host "0.0 tok/s  [IDLE]" -ForegroundColor DarkGray
         }
@@ -91,7 +95,11 @@ function Show-Dashboard {
             $mName = $prop.Name
             $mTokens = [long]$prop.Value.total_tokens
             $mReqs = [int]$prop.Value.requests
-            Write-Host ("   - {0,-20} : {1,12:N0} tokens  ({2} reqs)" -f $mName, $mTokens, $mReqs) -ForegroundColor White
+            $speedInfo = ""
+            if ($prop.Value.avg_speed_tps -and [double]$prop.Value.avg_speed_tps -gt 0) {
+                $speedInfo = "  [avg {0:N1} tok/s]" -f [double]$prop.Value.avg_speed_tps
+            }
+            Write-Host ("   - {0,-20} : {1,12:N0} tokens  ({2} reqs){3}" -f $mName, $mTokens, $mReqs, $speedInfo) -ForegroundColor White
         }
     }
 
