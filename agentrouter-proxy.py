@@ -1772,9 +1772,7 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             self.wfile.write(body)
             self.wfile.flush()
             return
-        if self.path in ("/", "/dashboard", "/_dashboard"):
-            if not self._authorized():
-                return
+        if self.path in ("/", "/dashboard", "/_dashboard", "/login", "/login/"):
             self._serve_dashboard()
             return
 
