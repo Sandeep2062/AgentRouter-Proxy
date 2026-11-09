@@ -41,6 +41,37 @@ It automatically handles:
 
 ---
 
+## Universal Quickstart (Windows, macOS, Linux)
+
+| Platform | Interactive Setup Wizard | On-Demand Runner | Live Speed & Token Monitor |
+| :--- | :--- | :--- | :--- |
+| **Windows** | Double-click `setup.bat` | Double-click `run.bat` | Double-click `watch-usage.bat` |
+| **Linux & macOS** | Run `./setup.sh` | Run `./run.sh` | Run `./status.sh` |
+| **Any OS (Python)** | `python setup.py` | `python agentrouter-proxy.py 4182` | `python agentrouter-proxy.py` |
+
+The interactive setup wizard automates everything:
+1. Detects your upstream API key or prompts to save it.
+2. Auto-detects your **Tailscale** IP address (`100.x.y.z`) if available.
+3. Configures either **Local Only** (`127.0.0.1`) or **Tailscale Network Mesh** mode.
+4. Sets up **On-Demand** mode (manual click to run) or **Auto-Start on Boot** (Windows Startup / Linux systemd / macOS LaunchAgent).
+5. Shows the exact Base URL & Key to copy into OpenCode, Cursor, Claude Code, Cline, Roo, Kilo.
+
+---
+
+## Working in Multiple Projects Simultaneously
+
+You do **NOT** need to start multiple proxies for multiple projects!
+- **One proxy serves everything:** Start the proxy once (e.g. `run.bat` or `./run.sh`).
+- **Concurrent & Non-Blocking:** Each request is processed on an asynchronous daemon thread with zero blocking between projects.
+- **Multiple Editors:** Open Cursor on Project A, OpenCode on Project B, and Claude Code on Project C. Point all of them to:
+  ```text
+  Base URL: http://127.0.0.1:4182/v1
+  API Key:  sk-local
+  ```
+- **Different Models per Project:** Project A can use `claude-3-7-sonnet`, Project B can use `gpt-4o`, and Project C can use `deepseek-chat` simultaneously without collision.
+
+---
+
 ## Local Proxy vs. Tailscale Proxy: Which One Do You Need?
 
 | Feature | Local Proxy (Single PC) | Tailscale Proxy (Two PCs / Server) |

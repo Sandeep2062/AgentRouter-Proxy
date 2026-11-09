@@ -341,6 +341,10 @@ def record_tokens(model: str, prompt_tokens: int, completion_tokens: int, total_
         month_bucket["total_tokens"] = month_bucket.get("total_tokens", 0) + total_tokens
         month_bucket["requests"] = month_bucket.get("requests", 0) + 1
         _save_usage(data)
+    now_str = datetime.datetime.now().strftime("%H:%M:%S")
+    sys.stderr.write(
+        f"[ar] [{now_str}] [USAGE] {model}: +{completion_tokens:,} completion (+{prompt_tokens:,} prompt) -> {total_tokens:,} total tokens\n"
+    )
 
 
 def get_usage_summary() -> dict:
@@ -1823,6 +1827,10 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                 _stats["content_blocked"] += 1
             _check_and_increment_block(model)
             retry_body = trim_context_for_retry(body)
+            try:
+                resp.close()
+            except Exception:
+                pass
             self._attempt_request(
                 retry_body,
                 is_retry=True,
@@ -1843,6 +1851,10 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                     f"[ar] [FAILOVER] rate-limit in first SSE event on key ...{upstream_key[-6:]}, "
                     f"switching to alternate key ...{alt_key[-6:]} and retrying...\n"
                 )
+                try:
+                    resp.close()
+                except Exception:
+                    pass
                 self._attempt_request(
                     body,
                     is_retry=True,
@@ -1857,6 +1869,10 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                     "backing off 3s and retrying...\n"
                 )
                 time.sleep(3.0)
+                try:
+                    resp.close()
+                except Exception:
+                    pass
                 self._attempt_request(
                     body,
                     is_retry=True,
@@ -1968,6 +1984,10 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             sys.stderr.write("[ar] [OK] retry succeeded\n")
             with _stats_lock:
                 _stats["retry_success"] += 1
+        try:
+            resp.close()
+        except Exception:
+            pass
 
     # ------ Non-streaming response handler ------
 
@@ -2093,6 +2113,11 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             except Exception:
                 pass
 
+        try:
+            resp.close()
+        except Exception:
+            pass
+
     # ------ HTTP error handler ------
 
     def _handle_http_error(self, e, err_body, body, model, is_retry, debug, target_path, upstream_key=None):
@@ -2189,6 +2214,10 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                 self.send_header(k, v)
         self.end_headers()
         self.wfile.write(err_body)
+        try:
+            e.close()
+        except Exception:
+            pass
 
     # ------ Logging ------
 
@@ -2203,6 +2232,9 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
 
 class ThreadedHTTPServer(http.server.HTTPServer):
     """Handle each request in a separate daemon thread."""
+    daemon_threads = True
+    allow_reuse_address = True
+    request_queue_size = 128
 
     def process_request(self, request, client_address):
         t = threading.Thread(

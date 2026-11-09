@@ -8,9 +8,9 @@ param(
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $envFile = Join-Path $scriptDir ".env"
 
-$targetHost = "100.97.230.23"
+$targetHost = "127.0.0.1"
 $targetPort = 4182
-$authToken = "wyse-test-secret-2026"
+$authToken = ""
 
 if (Test-Path $envFile) {
     Get-Content $envFile | ForEach-Object {
@@ -19,7 +19,7 @@ if (Test-Path $envFile) {
             $parts = $line.Split("=", 2)
             $k = $parts[0].Trim()
             $v = $parts[1].Trim().Trim("'`"")
-            if ($k -eq "PROXY_LISTEN_HOST" -and $v -and $v -ne "127.0.0.1" -and $v -ne "localhost") { $targetHost = $v }
+            if ($k -eq "PROXY_LISTEN_HOST" -and $v) { $targetHost = $v }
             if ($k -eq "PROXY_PORT" -and $v) { $targetPort = $v }
             if ($k -eq "PROXY_AUTH_TOKEN" -and $v) { $authToken = $v }
         }
@@ -48,9 +48,10 @@ function Show-Dashboard {
         Clear-Host
     }
 
+    $targetLabel = if ($baseUri -like "*127.0.0.1*" -or $baseUri -like "*localhost*") { "Local PC" } else { "Remote / Network" }
     Write-Host "=================================================================" -ForegroundColor Cyan
     Write-Host "   AgentRouter-Proxy - Live Token & Speed Monitor" -ForegroundColor Cyan
-    Write-Host "   Target: $baseUri (Wyse PC)" -ForegroundColor DarkGray
+    Write-Host "   Target: $baseUri ($targetLabel)" -ForegroundColor DarkGray
     Write-Host "=================================================================" -ForegroundColor Cyan
 
     if ($stats -and $stats.requests -ne $null) {
@@ -155,7 +156,11 @@ if ($Watch) {
         }
     } catch {
         Write-Host "[ERROR] Could not connect to proxy at $baseUri : $_" -ForegroundColor Red
-        Write-Host "Make sure the proxy is running and your Tailscale connection is active." -ForegroundColor Yellow
+        if ($baseUri -like "*127.0.0.1*" -or $baseUri -like "*localhost*") {
+            Write-Host "Make sure the proxy is running! (Double-click run-local.bat to start it)" -ForegroundColor Yellow
+        } else {
+            Write-Host "Make sure the proxy is running and your Tailscale connection is active." -ForegroundColor Yellow
+        }
         Read-Host "Press Enter to exit"
     }
 }
